@@ -38,11 +38,36 @@ export const WIND_COLORS = {
   cat5: '#F43F5E',
 } as const;
 
+// Smooth wind→colour ramp (1 kt lookup table) so tracks blend through the palette instead of
+// snapping between four flat bands; the low end is a brighter blue so it stays visible.
+const WIND_STOPS: ReadonlyArray<readonly [number, number, number, number]> = [
+  [30, 0x2f, 0x52, 0xd0],
+  [64, 0x06, 0xb6, 0xd4],
+  [96, 0xf5, 0x9e, 0x0b],
+  [125, 0xf7, 0x2d, 0x50],
+  [175, 0xff, 0x2e, 0x55],
+];
+const WIND_LUT: string[] = (() => {
+  const out: string[] = [];
+  for (let kt = 0; kt <= 200; kt++) {
+    let a = WIND_STOPS[0];
+    let b = WIND_STOPS[WIND_STOPS.length - 1];
+    for (let i = 0; i < WIND_STOPS.length - 1; i++) {
+      if (kt <= WIND_STOPS[i + 1][0]) {
+        a = WIND_STOPS[i];
+        b = WIND_STOPS[i + 1];
+        break;
+      }
+    }
+    const t = Math.min(1, Math.max(0, (kt - a[0]) / (b[0] - a[0])));
+    const c = [1, 2, 3].map((j) => Math.round(a[j] + (b[j] - a[j]) * t));
+    out.push(`rgb(${c[0]},${c[1]},${c[2]})`);
+  }
+  return out;
+})();
+
 export function windColor(kt: number): string {
-  if (kt < 64) return WIND_COLORS.ts;
-  if (kt < 96) return WIND_COLORS.cat12;
-  if (kt < 137) return WIND_COLORS.cat34;
-  return WIND_COLORS.cat5;
+  return WIND_LUT[Math.max(0, Math.min(200, Math.round(kt)))];
 }
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -619,12 +644,19 @@ export class VortexEngine {
     ctx.lineJoin = 'round';
     // Thinner strokes on small viewports so dense tracks stay crisp rather than smeared.
     const widthScale = clamp01(Math.min(W, H) / 640) * 0.45 + 0.55;
+    // 0 on desktop-sized canvases, up to ~1 on phones: on small canvases overlapping tracks
+    // flatten into one tone, so widen the gap between faint tails and bright peak segments
+    // (more tonal depth) and lift the overall level slightly.
+    const mob = 1 - clamp01(Math.min(W, H) / 640);
+    const aFloor = 0.35 - 0.22 * mob;
+    const aRange = 0.5 + 0.35 * mob;
+    const lift = 1 + 0.2 * mob;
     const dimMul = 1 - this.hoverDim * 0.85;
     // With 'screen' blending, hundreds of overlapping tracks saturate towards white. Scale line
     // opacity down as more tracks are visible so overlaps build colour and depth instead
     // (≈ full strength for ~220 tracks or fewer; ~0.41x at ~1,100 tracks).
     const density = clamp01(Math.pow(220 / Math.max(this.lastCount, 1), 0.55));
-    const lineScale = Math.max(0.3, density) * this.intensity;
+    const lineScale = Math.max(0.3, density) * this.intensity * 1.12;
     for (const p of this.storms) {
       if (p.alpha < 0.003 || p === this.hovered) continue;
       const base = p.alpha * dimMul * lineScale;
@@ -632,7 +664,7 @@ export class VortexEngine {
       for (let i = 1; i < p.n; i++) {
         const wi = (p.wind[i - 1] + p.wind[i]) / 2;
         const norm = clamp01((wi - 30) / range);
-        ctx.globalAlpha = (0.35 + 0.5 * norm) * base;
+        ctx.globalAlpha = Math.min(1, (aFloor + aRange * norm) * base * lift * (wi >= 110 ? 1.3 : 1));
         ctx.strokeStyle = windColor(wi);
         ctx.lineWidth = (0.8 + 1.7 * norm) * widthScale;
         ctx.beginPath();
