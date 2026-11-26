@@ -2,6 +2,11 @@
   "name": "vortex",
   "private": true,
   "version": "1.0.0",
+  "description": "Vortex: Shapes of Cyclones. An interactive visualization of the morphology of global major cyclone tracks, 1980 to present.",
+  "keywords": ["cyclones", "hurricanes", "typhoons", "IBTrACS", "data-visualization", "canvas", "react"],
+  "homepage": "https://rigal-dev.github.io/Vortex/",
+  "repository": { "type": "git", "url": "git+https://github.com/rigal-dev/Vortex.git" },
+  "bugs": { "url": "https://github.com/rigal-dev/Vortex/issues" },
   "type": "module",
   "scripts": {
     "dev": "vite",
