@@ -127,7 +127,7 @@ const VIEW_OPTIONS = [
 
 const LAYOUT_OPTIONS = [
   { value: 'unified', label: 'Unified' },
-  { value: 'split', label: 'Split Hemisphere' },
+  { value: 'split', label: 'Split' },
 ] as const satisfies ReadonlyArray<{ value: LayoutMode; label: string }>;
 
 const SCALE_OPTIONS = [
@@ -173,6 +173,9 @@ export default function App() {
   const [hovered, setHovered] = useState<Cyclone | null>(null);
   const [visible, setVisible] = useState(0);
   const [wide, setWide] = useState(() => window.innerWidth >= WIDE_BREAKPOINT);
+  // Desktop only: the docked controls panel can be collapsed to give the canvas the full width.
+  const [menuOpen, setMenuOpen] = useState(true);
+  const menuOpenRef = useRef(true);
 
   const yearBounds = useMemo(() => {
     let max = CURRENT_YEAR;
@@ -201,6 +204,7 @@ export default function App() {
       const isWide = window.innerWidth >= WIDE_BREAKPOINT;
       setWide(isWide);
       engine.setInsets(isWide ? { ...VIEWER_INSETS, right: PANEL_W } : MOBILE_INSETS);
+      engine.setShift(isWide && !menuOpenRef.current ? (PANEL_W - VIEWER_INSETS.left) / 2 : 0);
     };
     fit();
     engine.start();
@@ -216,6 +220,15 @@ export default function App() {
       engineRef.current = null;
     };
   }, []);
+
+  // Re-centre the visualization (without resizing it) when the desktop panel collapses or expands.
+  useEffect(() => {
+    menuOpenRef.current = menuOpen;
+    if (window.innerWidth >= WIDE_BREAKPOINT) {
+      // Same size, just re-centred in the freed space.
+      engineRef.current?.setShift(menuOpen ? 0 : (PANEL_W - VIEWER_INSETS.left) / 2);
+    }
+  }, [menuOpen]);
 
   // Push data first, then view (filters need data present). Declared in this order on purpose.
   useEffect(() => {
@@ -310,25 +323,30 @@ export default function App() {
 
       {/* Title block (floats over the viewer, top-left) */}
       <header className="vx-fade-in pointer-events-none absolute left-3 top-3 min-[900px]:left-7 min-[900px]:top-6">
-        <h1 className="bg-gradient-to-r from-white via-cyan-200 to-rose-300 bg-clip-text text-3xl font-light tracking-[0.3em] text-transparent min-[900px]:text-5xl">
+        <h1 className="text-base font-light tracking-[0.3em] text-slate-300/80 min-[900px]:text-xl">
           VORTEX
         </h1>
         <p className="mt-1 text-[11px] text-slate-400 min-[900px]:mt-2 min-[900px]:text-sm">
-          Morphology of Global Cyclones (1980–Present)
+          Morphology of Global Cyclones
         </p>
-        <p className="mt-0.5 font-mono text-sm text-white min-[900px]:mt-1 min-[900px]:text-lg">
-          {visible.toLocaleString()} <span className="text-xs text-slate-500 min-[900px]:text-sm">cyclones</span>
+        <p className="mt-0.5 text-[11px] text-slate-500 min-[900px]:mt-1 min-[900px]:text-sm">
+          {visible.toLocaleString()} cyclones
+        </p>
+        <p className="mt-0.5 text-[11px] text-slate-500 min-[900px]:mt-1 min-[900px]:text-sm">
+          1980–present
         </p>
       </header>
+
+      {/* Interaction hint (bottom-left) */}
+      <div className="pointer-events-none absolute bottom-3 left-3 hidden font-mono text-[10px] tracking-wide text-slate-600 sm:block min-[900px]:bottom-4 min-[900px]:left-7">
+        scroll to zoom · drag to pan · double-click to reset
+      </div>
 
       {/* Zoom controls */}
       <div
         className="absolute bottom-3 flex flex-col items-end gap-2 min-[900px]:bottom-4"
-        style={{ right: wide ? PANEL_W + 20 : 12 }}
+        style={{ right: wide ? (menuOpen ? PANEL_W + 20 : 20) : 12 }}
       >
-        <div className="hidden font-mono text-[10px] tracking-wide text-slate-600 sm:block">
-          scroll to zoom · drag to pan · double-click to reset
-        </div>
         <div
           className="flex overflow-hidden rounded-lg border border-white/10 bg-[#0B0D12]/70 backdrop-blur-xl"
           onPointerMove={(e) => e.stopPropagation()}
@@ -381,10 +399,28 @@ export default function App() {
         ))}
       </div>
 
+      {/* Desktop: collapse / expand the controls panel */}
+      <button
+        id="btn-menu-toggle"
+        type="button"
+        aria-label={menuOpen ? 'Hide controls' : 'Show controls'}
+        aria-expanded={menuOpen}
+        title={menuOpen ? 'Hide controls' : 'Show controls'}
+        onClick={() => setMenuOpen((o) => !o)}
+        onPointerMove={(e) => e.stopPropagation()}
+        onPointerEnter={onPointerLeave}
+        className="absolute top-4 z-30 hidden h-7 w-7 items-center justify-center rounded-md border border-white/10 bg-[#0B0D12]/80 font-mono text-sm text-slate-400 backdrop-blur-xl transition-[right,color] duration-300 hover:text-white min-[900px]:flex"
+        style={{ right: menuOpen ? PANEL_W + 12 : 12 }}
+      >
+        {menuOpen ? '›' : '‹'}
+      </button>
+
       {/* Controls: scrollable area below the stage on mobile; docked right panel on desktop */}
       <aside
         id="hud-panel"
-        className={`overflow-y-auto overscroll-contain border-t border-white/10 bg-[#0B0D12] p-4 min-[900px]:absolute min-[900px]:right-0 min-[900px]:top-0 min-[900px]:block min-[900px]:h-full min-[900px]:w-[340px] min-[900px]:flex-none min-[900px]:border-l min-[900px]:border-t-0 min-[900px]:bg-[#0B0D12]/90 min-[900px]:p-6 min-[900px]:shadow-[-20px_0_60px_rgba(0,0,0,0.5)] min-[900px]:backdrop-blur-xl ${
+        className={`overflow-y-auto overscroll-contain border-t border-white/10 bg-[#0B0D12] p-4 min-[900px]:absolute min-[900px]:right-0 min-[900px]:top-0 min-[900px]:block min-[900px]:h-full min-[900px]:w-[340px] min-[900px]:flex-none min-[900px]:border-l min-[900px]:border-t-0 min-[900px]:bg-[#0B0D12]/90 min-[900px]:p-6 min-[900px]:shadow-[-20px_0_60px_rgba(0,0,0,0.5)] min-[900px]:backdrop-blur-xl min-[900px]:transition-transform min-[900px]:duration-300 ${
+          menuOpen ? '' : 'min-[900px]:pointer-events-none min-[900px]:translate-x-full'
+        } ${
           pane === 'canvas' ? 'hidden' : pane === 'controls' ? 'min-h-0 flex-1 pt-12' : 'min-h-0 flex-1'
         }`}
         onPointerMove={(e) => e.stopPropagation()}

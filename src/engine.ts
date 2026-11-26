@@ -70,6 +70,8 @@ export function windColor(kt: number): string {
   return WIND_LUT[Math.max(0, Math.min(200, Math.round(kt)))];
 }
 
+/** Flow default view is zoomed out 20% (applies to Real, Equal and Fixed lengths). */
+const FLOW_ZOOM = 0.8;
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
@@ -169,6 +171,9 @@ export class VortexEngine {
   private insets: Insets = { top: 0, right: 0, bottom: 0, left: 0 };
   private rect = { x0: 0, y0: 0, w: 1, h: 1 };
   private reach90 = 2000;
+  /** Horizontal offset (px) of the whole visualization; eased toward shiftTarget. */
+  private shift = 0;
+  private shiftTarget = 0;
   /** Per-frame pixel sizing shared by both hemisphere viewports. */
   private dim = {
     k: 1,
@@ -353,6 +358,11 @@ export class VortexEngine {
     this.insets = insets;
   }
 
+  /** Slide the visualization sideways without resizing it (e.g. when a side panel collapses). */
+  setShift(px: number): void {
+    this.shiftTarget = px;
+  }
+
   setPointer(x: number | null, y = 0): void {
     this.pointer = x === null ? null : { x, y };
   }
@@ -508,6 +518,8 @@ export class VortexEngine {
       if (Math.abs(t - p.alpha) < 0.002) p.alpha = t;
     }
     this.hoverDim += ((this.hovered ? 1 : 0) - this.hoverDim) * (1 - Math.exp(-dt * 10));
+    this.shift += (this.shiftTarget - this.shift) * (1 - Math.exp(-dt * 10));
+    if (Math.abs(this.shiftTarget - this.shift) < 0.05) this.shift = this.shiftTarget;
     const ease = 1 - Math.exp(-dt * 14);
     const c = this.cam;
     const t = this.camTarget;
@@ -523,7 +535,8 @@ export class VortexEngine {
     const w = this.weightTween.value(now);
     const ws = this.scaleTween.value(now);
     const s = this.splitTween.value(now)[0];
-    const { left, right, top, bottom } = this.insets;
+    const { right, top, bottom } = this.insets;
+    const left = this.insets.left + this.shift;
     const Vw = Math.max(240, this.W - left - right);
     const Vh = Math.max(240, this.H - top - bottom);
     const cyc = top + Vh / 2;
@@ -539,7 +552,7 @@ export class VortexEngine {
     // real: fit the 90th-percentile track reach inside the tightest layout so most of the
     // shape stays in the canvas (rings stay to scale: they use the same px/km).
     d.k = Math.min(0.36 * m, 0.55 * dropH, 0.6 * Vh, 0.8 * flowSpan) / this.reach90;
-    d.kF = (0.42 * m) / 2000; // flow real: original fixed scale (2000 km = 42% of the viewer)
+    d.kF = (0.42 * m * FLOW_ZOOM) / 2000; // flow real: original fixed scale (2000 km = 42% of the viewer)
     d.mk = (vw * 0.94) / 360;
     d.peqR = 0.36 * m; // equal length: total path length in px
     d.pfxR = 0.3 * m; // fixed ends: genesis->dissipation distance in px
@@ -547,8 +560,8 @@ export class VortexEngine {
     d.pfxD = 0.58 * dropH;
     d.peqT = 0.7 * Vh; // timeline: tracks rise from the baseline
     d.pfxT = 0.6 * Vh;
-    d.peqF = 0.62 * flowSpan;
-    d.pfxF = 0.5 * flowSpan;
+    d.peqF = 0.62 * flowSpan * FLOW_ZOOM;
+    d.pfxF = 0.5 * flowSpan * FLOW_ZOOM;
 
     for (let h = 0; h < 2; h++) {
       const g = this.geos[h];
@@ -611,10 +624,9 @@ export class VortexEngine {
       const mD = wsR * dm.k + wsE * (dm.peqD / p.total) + wsF * (dm.pfxD / p.straight);
       const mT = wsR * dm.k + wsE * (dm.peqT / p.total) + wsF * (dm.pfxT / p.straight);
       const mF = wsR * dm.kF + wsE * (dm.peqF / p.total) + wsF * (dm.pfxF / p.straight);
-      // timeline: anchored on the time axis at genesis date; flow: anchored at the left edge for
-      // real length, but equal/fixed lengths are centred so the whole shape sits mid-canvas
-      const flowX0 =
-        wsR * (g.t0x + 8 - g.cx) - wsE * (dm.peqF / 2) - wsF * (dm.pfxF / 2);
+      // timeline: anchored on the time axis at genesis date; flow: genesis fixed at the
+      // Equal-length position (centred on the equal-length extent) for every length mode
+      const flowX0 = -dm.peqF / 2;
       const originX =
         g.cx + wT * (g.t0x + p.tf * (g.t1x - g.t0x) - g.cx) + wF * flowX0;
       const cr = p.cr;
@@ -657,26 +669,32 @@ export class VortexEngine {
     // (≈ full strength for ~220 tracks or fewer; ~0.41x at ~1,100 tracks).
     const density = clamp01(Math.pow(220 / Math.max(this.lastCount, 1), 0.55));
     const lineScale = Math.max(0.3, density) * this.intensity * 1.12;
-    for (const p of this.storms) {
-      if (p.alpha < 0.003 || p === this.hovered) continue;
-      const base = p.alpha * dimMul * lineScale;
-      const range = Math.max(1, p.peak - 30);
-      for (let i = 1; i < p.n; i++) {
-        const wi = (p.wind[i - 1] + p.wind[i]) / 2;
-        const norm = clamp01((wi - 30) / range);
-        ctx.globalAlpha = Math.min(1, (aFloor + aRange * norm) * base * lift * (wi >= 110 ? 1.3 : 1));
-        ctx.strokeStyle = windColor(wi);
-        ctx.lineWidth = (0.8 + 1.7 * norm) * widthScale;
-        ctx.beginPath();
-        ctx.moveTo(p.sx[i - 1], p.sy[i - 1]);
-        ctx.lineTo(p.sx[i], p.sy[i]);
-        ctx.stroke();
+    // In split layout each hemisphere is clipped to its own half, so tracks never cross the
+    // divider and the two sides stay totally distinct (even when zoomed or panned).
+    const splitX = Math.round(this.rect.x0 + this.rect.w / 2) + 0.5;
+    const clipSplit = s > 0.02;
+    const clipTo = (hemi: number): void => {
+      ctx.beginPath();
+      if (hemi === 0) ctx.rect(0, 0, splitX, H);
+      else ctx.rect(splitX, 0, W - splitX, H);
+      ctx.clip();
+    };
+    for (let h = 0; h < 2; h++) {
+      if (clipSplit) {
+        ctx.save();
+        clipTo(h);
       }
+      this.drawStorms(h, dimMul, lineScale, widthScale, aFloor, aRange, lift);
+      if (clipSplit) ctx.restore();
     }
 
     // hovered storm in vivid white
     const hp = this.hovered;
     if (hp && hp.alpha > 0.003) {
+      if (clipSplit) {
+        ctx.save();
+        clipTo(hp.hemi);
+      }
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
       ctx.strokeStyle = '#FFFFFF';
@@ -692,9 +710,39 @@ export class VortexEngine {
       ctx.arc(hp.sx[0], hp.sy[0], 3, 0, Math.PI * 2);
       ctx.fillStyle = '#FFFFFF';
       ctx.fill();
+      if (clipSplit) ctx.restore();
     }
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
+  }
+
+  /** Draws every visible (non-hovered) storm of one hemisphere. */
+  private drawStorms(
+    hemi: number,
+    dimMul: number,
+    lineScale: number,
+    widthScale: number,
+    aFloor: number,
+    aRange: number,
+    lift: number,
+  ): void {
+    const { ctx } = this;
+    for (const p of this.storms) {
+      if (p.hemi !== hemi || p.alpha < 0.003 || p === this.hovered) continue;
+      const base = p.alpha * dimMul * lineScale;
+      const range = Math.max(1, p.peak - 30);
+      for (let i = 1; i < p.n; i++) {
+        const wi = (p.wind[i - 1] + p.wind[i]) / 2;
+        const norm = clamp01((wi - 30) / range);
+        ctx.globalAlpha = Math.min(1, (aFloor + aRange * norm) * base * lift * (wi >= 110 ? 1.3 : 1));
+        ctx.strokeStyle = windColor(wi);
+        ctx.lineWidth = (0.8 + 1.7 * norm) * widthScale;
+        ctx.beginPath();
+        ctx.moveTo(p.sx[i - 1], p.sy[i - 1]);
+        ctx.lineTo(p.sx[i], p.sy[i]);
+        ctx.stroke();
+      }
+    }
   }
 
   private drawRings(alpha: number, s: number): void {
@@ -788,11 +836,11 @@ export class VortexEngine {
       const a = h === 0 ? alpha : alpha * s;
       if (a < 0.005) continue;
       const g = this.geos[h];
-      const [wsR, wsE, wsF] = this.scaleTween.value(performance.now());
-      const startX =
-        g.cx + wsR * (g.t0x + 8 - g.cx) - wsE * (this.dim.peqF / 2) - wsF * (this.dim.pfxF / 2);
+      const [, wsE, wsF] = this.scaleTween.value(performance.now());
+      // genesis sits at the same spot for every length mode (the Equal-length position)
+      const startX = g.cx - this.dim.peqF / 2;
       const x0 = startX * z + tx;
-      const x1 = (startX + wsR * this.dim.peqF + wsE * this.dim.peqF + wsF * this.dim.pfxF) * z + tx;
+      const x1 = (startX + (1 - wsE - wsF) * this.dim.peqF + wsE * this.dim.peqF + wsF * this.dim.pfxF) * z + tx;
       const y = g.oy * z + ty;
       ctx.setLineDash([2, 8]);
       ctx.globalAlpha = a * 0.2;
