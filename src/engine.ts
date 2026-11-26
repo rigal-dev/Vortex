@@ -143,9 +143,11 @@ export class VortexEngine {
   private scaleTween = new Tween([1, 0, 0], TRANSITION_MS);
   private insets: Insets = { top: 0, right: 0, bottom: 0, left: 0 };
   private rect = { x0: 0, y0: 0, w: 1, h: 1 };
+  private reach90 = 2000;
   /** Per-frame pixel sizing shared by both hemisphere viewports. */
   private dim = {
     k: 1,
+    kF: 1,
     mk: 1,
     peqR: 1,
     pfxR: 1,
@@ -264,6 +266,16 @@ export class VortexEngine {
 
   setData(cyclones: Cyclone[]): void {
     this.storms = cyclones.map((c) => this.prepare(c));
+    // 90th-percentile farthest reach (km) of a track from its genesis: real-length scale is
+    // fitted to this so most storms stay on screen instead of spilling over the edges.
+    const reach = this.storms
+      .map((p) => {
+        let r = 0;
+        for (let i = 0; i < p.n; i++) r = Math.max(r, Math.hypot(p.dx[i], p.dy[i]));
+        return r;
+      })
+      .sort((a, b) => a - b);
+    this.reach90 = Math.max(500, reach[Math.floor(reach.length * 0.9)] ?? 2000);
     // Timeline axis spans whole years covering the full dataset (independent of filters).
     if (this.storms.length > 0) {
       let lo = Infinity;
@@ -496,32 +508,35 @@ export class VortexEngine {
     const m = Math.min(vw, Vh);
     const dropH = Math.min(Vh, vw * 1.3);
     const d = this.dim;
-    d.k = (0.42 * m) / 2000; // real: 2000 km ring spans ~42% of the viewer
-    d.mk = (vw * 0.94) / 360;
-    d.peqR = 0.42 * m; // equal length: total path length in px
-    d.pfxR = 0.34 * m; // fixed ends: genesis->dissipation distance in px
-    d.peqD = 0.85 * dropH;
-    d.pfxD = 0.72 * dropH;
-    d.peqT = 0.85 * Vh; // timeline: tracks rise from the baseline
-    d.pfxT = 0.72 * Vh;
-    // flow: tracks run left -> right from a fixed start on the viewer's left edge
-    const flowPad = Math.min(40, vw * 0.06);
+    // flow: tracks run left -> right from a fixed start near the viewer's left edge
+    const flowPad = Math.min(56, vw * 0.09);
     const flowSpan = Math.max(100, vw - 2 * flowPad - 16);
-    d.peqF = 0.92 * flowSpan;
-    d.pfxF = 0.74 * flowSpan;
+    // real: fit the 90th-percentile track reach inside the tightest layout so most of the
+    // shape stays in the canvas (rings stay to scale: they use the same px/km).
+    d.k = Math.min(0.36 * m, 0.55 * dropH, 0.6 * Vh, 0.8 * flowSpan) / this.reach90;
+    d.kF = (0.42 * m) / 2000; // flow real: original fixed scale (2000 km = 42% of the viewer)
+    d.mk = (vw * 0.94) / 360;
+    d.peqR = 0.36 * m; // equal length: total path length in px
+    d.pfxR = 0.3 * m; // fixed ends: genesis->dissipation distance in px
+    d.peqD = 0.68 * dropH;
+    d.pfxD = 0.58 * dropH;
+    d.peqT = 0.7 * Vh; // timeline: tracks rise from the baseline
+    d.pfxT = 0.6 * Vh;
+    d.peqF = 0.62 * flowSpan;
+    d.pfxF = 0.5 * flowSpan;
 
     for (let h = 0; h < 2; h++) {
       const g = this.geos[h];
       g.cx = left + lerp(Vw / 2, Vw * (h === 0 ? 0.25 : 0.75), s);
       g.cy = cyc;
       // radial: centred; drop: genesis low so the axis is centred; timeline: baseline low
-      g.oy = cyc + w[1] * 0.36 * dropH + w[3] * 0.4 * Vh;
+      g.oy = cyc + w[1] * 0.3 * dropH + w[3] * 0.36 * Vh;
       g.vw = vw;
       g.k = d.k;
       g.mk = d.mk;
       g.len = d.pfxD;
-      g.t0x = g.cx - vw / 2 + Math.min(40, vw * 0.06);
-      g.t1x = g.cx + vw / 2 - Math.min(40, vw * 0.06);
+      g.t0x = g.cx - vw / 2 + flowPad;
+      g.t1x = g.cx + vw / 2 - flowPad;
     }
     return { w, s, ws };
   }
@@ -570,10 +585,13 @@ export class VortexEngine {
       const mR = wsR * dm.k + wsE * (dm.peqR / p.total) + wsF * (dm.pfxR / p.straight);
       const mD = wsR * dm.k + wsE * (dm.peqD / p.total) + wsF * (dm.pfxD / p.straight);
       const mT = wsR * dm.k + wsE * (dm.peqT / p.total) + wsF * (dm.pfxT / p.straight);
-      const mF = wsR * dm.k + wsE * (dm.peqF / p.total) + wsF * (dm.pfxF / p.straight);
-      // timeline: anchored on the time axis at genesis date; flow: anchored at the left edge
+      const mF = wsR * dm.kF + wsE * (dm.peqF / p.total) + wsF * (dm.pfxF / p.straight);
+      // timeline: anchored on the time axis at genesis date; flow: anchored at the left edge for
+      // real length, but equal/fixed lengths are centred so the whole shape sits mid-canvas
+      const flowX0 =
+        wsR * (g.t0x + 8 - g.cx) - wsE * (dm.peqF / 2) - wsF * (dm.pfxF / 2);
       const originX =
-        g.cx + wT * (g.t0x + p.tf * (g.t1x - g.t0x) - g.cx) + wF * (g.t0x + 8 - g.cx);
+        g.cx + wT * (g.t0x + p.tf * (g.t1x - g.t0x) - g.cx) + wF * flowX0;
       const cr = p.cr;
       const sr = p.sr;
       for (let i = 0; i < p.n; i++) {
@@ -595,8 +613,12 @@ export class VortexEngine {
 
     // storms
     ctx.globalCompositeOperation = 'screen';
-    ctx.lineCap = 'round';
+    // Butt caps: each track is drawn as many short segments, and round caps overlap at every
+    // joint, doubling the alpha there and making fine lines look beaded/dotted on small screens.
+    ctx.lineCap = 'butt';
     ctx.lineJoin = 'round';
+    // Thinner strokes on small viewports so dense tracks stay crisp rather than smeared.
+    const widthScale = clamp01(Math.min(W, H) / 640) * 0.45 + 0.55;
     const dimMul = 1 - this.hoverDim * 0.85;
     // With 'screen' blending, hundreds of overlapping tracks saturate towards white. Scale line
     // opacity down as more tracks are visible so overlaps build colour and depth instead
@@ -612,7 +634,7 @@ export class VortexEngine {
         const norm = clamp01((wi - 30) / range);
         ctx.globalAlpha = (0.35 + 0.5 * norm) * base;
         ctx.strokeStyle = windColor(wi);
-        ctx.lineWidth = 0.8 + 1.7 * norm;
+        ctx.lineWidth = (0.8 + 1.7 * norm) * widthScale;
         ctx.beginPath();
         ctx.moveTo(p.sx[i - 1], p.sy[i - 1]);
         ctx.lineTo(p.sx[i], p.sy[i]);
@@ -734,8 +756,11 @@ export class VortexEngine {
       const a = h === 0 ? alpha : alpha * s;
       if (a < 0.005) continue;
       const g = this.geos[h];
-      const x0 = (g.t0x + 8) * z + tx;
-      const x1 = (g.t0x + 8 + this.dim.peqF) * z + tx;
+      const [wsR, wsE, wsF] = this.scaleTween.value(performance.now());
+      const startX =
+        g.cx + wsR * (g.t0x + 8 - g.cx) - wsE * (this.dim.peqF / 2) - wsF * (this.dim.pfxF / 2);
+      const x0 = startX * z + tx;
+      const x1 = (startX + wsR * this.dim.peqF + wsE * this.dim.peqF + wsF * this.dim.pfxF) * z + tx;
       const y = g.oy * z + ty;
       ctx.setLineDash([2, 8]);
       ctx.globalAlpha = a * 0.2;
