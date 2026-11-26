@@ -237,7 +237,7 @@ export default function App() {
     const ctrl = new AbortController();
     (async () => {
       try {
-        const res = await fetch('/cyclones.json', { signal: ctrl.signal });
+        const res = await fetch(`${import.meta.env.BASE_URL}cyclones.json`, { signal: ctrl.signal });
         if (!res.ok) return;
         const json: unknown = await res.json();
         if (!Array.isArray(json)) return;
