@@ -65,7 +65,7 @@ const PANE_OPTIONS: ReadonlyArray<{ value: PaneMode; label: string; icon: ReactN
 const MIN_YEAR = 1980;
 const CURRENT_YEAR = new Date().getFullYear();
 
-type DataStatus = 'mock' | 'live';
+type DataStatus = 'loading' | 'mock' | 'live';
 
 interface SegmentedProps<T extends string> {
   label: string;
@@ -117,6 +117,13 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
+const SPEED_OPTIONS = [
+  { label: 'Slow', rate: 0.75, dur: 3 },
+  { label: 'Normal', rate: 1.5, dur: 2.2 },
+  { label: 'Fast', rate: 3, dur: 1.5 },
+  { label: 'Faster', rate: 6, dur: 1 },
+] as const;
+
 const VIEW_OPTIONS = [
   { value: 'radial', label: 'Radial' },
   { value: 'drop', label: 'Drop' },
@@ -157,8 +164,8 @@ export default function App() {
   const stageRef = useRef<HTMLDivElement>(null);
 
   // Synthetic data renders instantly; real data replaces it when it arrives.
-  const [data, setData] = useState<Cyclone[]>(() => generateMockCyclones(CURRENT_YEAR));
-  const [status, setStatus] = useState<DataStatus>('mock');
+  const [data, setData] = useState<Cyclone[]>([]);
+  const [status, setStatus] = useState<DataStatus>('loading');
   const [mode, setMode] = useState<ViewMode>('radial');
   const [layout, setLayout] = useState<LayoutMode>('unified');
   const [scale, setScale] = useState<ScaleMode>('equal');
@@ -176,6 +183,10 @@ export default function App() {
   // Desktop only: the docked controls panel can be collapsed to give the canvas the full width.
   const [menuOpen, setMenuOpen] = useState(true);
   const menuOpenRef = useRef(true);
+  // Chronological playback
+  const [playState, setPlayState] = useState<'idle' | 'playing' | 'paused'>('idle');
+  const [speedIdx, setSpeedIdx] = useState(1);
+  const [playLabel, setPlayLabel] = useState<string | null>(null);
 
   const yearBounds = useMemo(() => {
     let max = CURRENT_YEAR;
@@ -196,6 +207,8 @@ export default function App() {
     const engine = new VortexEngine(canvas, {
       onHover: setHovered,
       onVisibleCount: setVisible,
+      onPlayClock: setPlayLabel,
+      onPlayEnd: () => setPlayState('idle'),
     });
     engineRef.current = engine;
     // Keep the visualization inside the stage: clear of the docked panel on desktop,
@@ -220,6 +233,24 @@ export default function App() {
       engineRef.current = null;
     };
   }, []);
+
+  const startPlay = () => {
+    const sp = SPEED_OPTIONS[speedIdx];
+    engineRef.current?.playStart(sp.rate, sp.dur);
+    setPlayState('playing');
+  };
+  const togglePlay = () => {
+    if (playState === 'idle') startPlay();
+    else setPlayState(engineRef.current?.playToggle() ? 'playing' : 'paused');
+  };
+  const stopPlay = () => {
+    engineRef.current?.playStop();
+    setPlayState('idle');
+  };
+  const changeSpeed = (i: number) => {
+    setSpeedIdx(i);
+    engineRef.current?.playSetSpeed(SPEED_OPTIONS[i].rate, SPEED_OPTIONS[i].dur);
+  };
 
   // Re-centre the visualization (without resizing it) when the desktop panel collapses or expands.
   useEffect(() => {
@@ -251,15 +282,19 @@ export default function App() {
     (async () => {
       try {
         const res = await fetch(`${import.meta.env.BASE_URL}cyclones.json`, { signal: ctrl.signal });
-        if (!res.ok) return;
+        if (!res.ok) throw new Error('bad response');
         const json: unknown = await res.json();
-        if (!Array.isArray(json)) return;
+        if (!Array.isArray(json)) throw new Error('bad data');
         const valid = json.filter(isCyclone);
-        if (valid.length === 0) return;
+        if (valid.length === 0) throw new Error('empty data');
         setData(valid);
         setStatus('live');
       } catch {
-        /* keep mock data (aborted, offline, 404 or malformed) */
+        // Offline, 404 or malformed: fall back to the synthetic preview (not when aborted).
+        if (!ctrl.signal.aborted) {
+          setData(generateMockCyclones(CURRENT_YEAR));
+          setStatus('mock');
+        }
       }
     })();
     return () => ctrl.abort();
@@ -336,6 +371,13 @@ export default function App() {
           1980–present
         </p>
       </header>
+
+      {/* Playback date */}
+      {playLabel && (
+        <div className="pointer-events-none absolute bottom-8 left-3 font-mono text-lg tracking-wide text-slate-300/80 min-[900px]:bottom-10 min-[900px]:left-7 min-[900px]:text-2xl">
+          {playLabel}
+        </div>
+      )}
 
       {/* Interaction hint (bottom-left) */}
       <div className="pointer-events-none absolute bottom-3 left-3 hidden font-mono text-[10px] tracking-wide text-slate-600 sm:block min-[900px]:bottom-4 min-[900px]:left-7">
@@ -446,6 +488,49 @@ export default function App() {
 
           <Section title="Layout">
             <Segmented label="Layout" value={layout} options={LAYOUT_OPTIONS} onChange={setLayout} />
+          </Section>
+
+          <Section title="Playback">
+            <div className="flex items-center gap-2">
+              <button
+                id="btn-play"
+                type="button"
+                onClick={togglePlay}
+                aria-label={playState === 'playing' ? 'Pause' : 'Play chronologically'}
+                className="flex h-8 flex-1 items-center justify-center gap-2 rounded-lg bg-white/[0.04] text-[11px] text-slate-200 ring-1 ring-white/10 transition hover:bg-white/10 hover:text-white"
+              >
+                <span aria-hidden>{playState === 'playing' ? '❚❚' : '▶'}</span>
+                {playState === 'playing' ? 'Pause' : playState === 'paused' ? 'Resume' : 'Play'}
+              </button>
+              {playState !== 'idle' && (
+                <button
+                  id="btn-stop"
+                  type="button"
+                  onClick={stopPlay}
+                  aria-label="Stop playback"
+                  title="Stop"
+                  className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/[0.04] text-[11px] text-slate-300 ring-1 ring-white/10 transition hover:bg-white/10 hover:text-white"
+                >
+                  ■
+                </button>
+              )}
+              <select
+                id="select-speed"
+                aria-label="Playback speed"
+                value={speedIdx}
+                onChange={(e) => changeSpeed(Number(e.target.value))}
+                className="h-8 rounded-lg bg-[#0B0D12] px-2 text-[11px] text-slate-300 ring-1 ring-white/10 outline-none transition hover:text-white focus:ring-white/30"
+              >
+                {SPEED_OPTIONS.map((o, i) => (
+                  <option key={o.label} value={i}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <p className="text-[10px] leading-snug text-slate-500">
+              Replays the filtered years in order: each storm draws in from its genesis date, glowing as it grows.
+            </p>
           </Section>
 
           <Section title="Basin">
@@ -584,7 +669,7 @@ export default function App() {
                     status === 'live' ? 'bg-emerald-400' : 'animate-pulse bg-amber-400'
                   }`}
                 />
-                {status === 'live' ? 'cyclones.json' : 'synthetic preview'}
+                {status === 'live' ? 'cyclones.json' : status === 'loading' ? 'loading…' : 'synthetic preview'}
               </span>
             </div>
           </footer>

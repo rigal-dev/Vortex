@@ -140,7 +140,13 @@ interface Geo {
 export interface EngineCallbacks {
   onHover: (c: Cyclone | null) => void;
   onVisibleCount: (n: number) => void;
+  /** Playback date label (e.g. "Sep 1994"), or null when playback is not active. */
+  onPlayClock?: (label: string | null) => void;
+  /** Playback ran to the end and returned to the normal view. */
+  onPlayEnd?: () => void;
 }
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 export class VortexEngine {
   private readonly ctx: CanvasRenderingContext2D;
@@ -173,6 +179,10 @@ export class VortexEngine {
   private reach90 = 2000;
   /** Horizontal offset (px) of the whole visualization; eased toward shiftTarget. */
   private shift = 0;
+  /** Intro 0→1: every track grows outward from its genesis point at the same time. */
+  private intro = 1;
+  /** Chronological playback: a clock in decimal years; storms draw in as it passes their genesis. */
+  private play = { active: false, running: false, clock: 0, t1: 0, rate: 1.5, dur: 2.2, month: -1 };
   private shiftTarget = 0;
   /** Per-frame pixel sizing shared by both hemisphere viewports. */
   private dim = {
@@ -296,6 +306,7 @@ export class VortexEngine {
 
   setData(cyclones: Cyclone[]): void {
     this.storms = cyclones.map((c) => this.prepare(c));
+    this.intro = this.storms.length > 0 ? 0 : 1;
     // 90th-percentile farthest reach (km) of a track from its genesis: real-length scale is
     // fitted to this so most storms stay on screen instead of spilling over the edges.
     const reach = this.storms
@@ -356,6 +367,40 @@ export class VortexEngine {
 
   setInsets(insets: Insets): void {
     this.insets = insets;
+  }
+
+  /** Start chronological playback of the filtered year range from the beginning. */
+  playStart(rate: number, dur: number): void {
+    const f = this.view?.filters;
+    const pl = this.play;
+    pl.active = true;
+    pl.running = true;
+    pl.rate = rate;
+    pl.dur = dur;
+    pl.clock = f ? f.yearMin : 1980;
+    pl.t1 = f ? f.yearMax + 1 : 2026;
+    pl.month = -1;
+    this.setHover(null);
+  }
+
+  /** Pause / resume playback (no-op when not active). */
+  playToggle(): boolean {
+    if (!this.play.active) return false;
+    this.play.running = !this.play.running;
+    return this.play.running;
+  }
+
+  /** Change speed: years per second, and seconds each storm takes to draw. */
+  playSetSpeed(rate: number, dur: number): void {
+    this.play.rate = rate;
+    this.play.dur = dur;
+  }
+
+  /** Leave playback and return to the normal static view. */
+  playStop(): void {
+    this.play.active = false;
+    this.play.running = false;
+    this.cb.onPlayClock?.(null);
   }
 
   /** Slide the visualization sideways without resizing it (e.g. when a side panel collapses). */
@@ -520,6 +565,22 @@ export class VortexEngine {
     this.hoverDim += ((this.hovered ? 1 : 0) - this.hoverDim) * (1 - Math.exp(-dt * 10));
     this.shift += (this.shiftTarget - this.shift) * (1 - Math.exp(-dt * 10));
     if (Math.abs(this.shiftTarget - this.shift) < 0.05) this.shift = this.shiftTarget;
+    if (this.intro < 1) this.intro = Math.min(1, this.intro + dt / 1.5);
+    const pl = this.play;
+    if (pl.active && pl.running) {
+      pl.clock += pl.rate * dt;
+      const m = Math.floor(pl.clock * 12);
+      if (m !== pl.month) {
+        pl.month = m;
+        const y = Math.floor(pl.clock);
+        this.cb.onPlayClock?.(`${MONTHS[Math.min(11, Math.floor((pl.clock - y) * 12))]} ${y}`);
+      }
+      // all storms drawn and faded to rest: hand back to the normal view
+      if (pl.clock > pl.t1 + pl.dur * pl.rate + 1.2 * pl.rate) {
+        this.playStop();
+        this.cb.onPlayEnd?.();
+      }
+    }
     const ease = 1 - Math.exp(-dt * 14);
     const c = this.cam;
     const t = this.camTarget;
@@ -727,20 +788,52 @@ export class VortexEngine {
     lift: number,
   ): void {
     const { ctx } = this;
+    const pl = this.play;
+    const durY = pl.dur * pl.rate;
     for (const p of this.storms) {
       if (p.hemi !== hemi || p.alpha < 0.003 || p === this.hovered) continue;
-      const base = p.alpha * dimMul * lineScale;
+      // playback: draw each track progressively from its genesis time, glowing while it grows
+      let level = 1;
+      let lastSeg = p.n - 1;
+      let growing = false;
+      if (pl.active) {
+        if (pl.clock < p.t) continue;
+        const f = clamp01((pl.clock - p.t) / durY);
+        lastSeg = f * (p.n - 1);
+        growing = f < 1;
+        level = growing ? 1 : 0.3 + 0.7 * Math.exp(-(pl.clock - p.t - durY) / pl.rate / 1.2);
+      } else if (this.intro < 1) {
+        // opening animation: one shared, eased spread fraction for every storm
+        lastSeg = (1 - Math.pow(1 - this.intro, 3)) * (p.n - 1);
+      }
+      const base = p.alpha * dimMul * lineScale * level;
       const range = Math.max(1, p.peak - 30);
       for (let i = 1; i < p.n; i++) {
+        if (i - 1 >= lastSeg) break;
+        const frac = Math.min(1, lastSeg - (i - 1));
+        const head = growing && lastSeg - (i - 1) < 4 ? 1 : 0;
         const wi = (p.wind[i - 1] + p.wind[i]) / 2;
         const norm = clamp01((wi - 30) / range);
-        ctx.globalAlpha = Math.min(1, (aFloor + aRange * norm) * base * lift * (wi >= 110 ? 1.3 : 1));
+        ctx.globalAlpha = Math.min(1, (aFloor + aRange * norm) * base * lift * (wi >= 110 ? 1.3 : 1) * (1 + 0.6 * head));
         ctx.strokeStyle = windColor(wi);
-        ctx.lineWidth = (0.8 + 1.7 * norm) * widthScale;
+        ctx.lineWidth = (0.8 + 1.7 * norm) * widthScale * (1 + 0.7 * head);
+        const x0 = p.sx[i - 1];
+        const y0 = p.sy[i - 1];
         ctx.beginPath();
-        ctx.moveTo(p.sx[i - 1], p.sy[i - 1]);
-        ctx.lineTo(p.sx[i], p.sy[i]);
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x0 + (p.sx[i] - x0) * frac, y0 + (p.sy[i] - y0) * frac);
         ctx.stroke();
+      }
+      if (growing) {
+        const i = Math.min(p.n - 2, Math.floor(lastSeg));
+        const fr = lastSeg - i;
+        const hx = p.sx[i] + (p.sx[i + 1] - p.sx[i]) * fr;
+        const hy = p.sy[i] + (p.sy[i + 1] - p.sy[i]) * fr;
+        ctx.globalAlpha = Math.min(1, 0.9 * p.alpha);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.beginPath();
+        ctx.arc(hx, hy, 2.2 * widthScale, 0, Math.PI * 2);
+        ctx.fill();
       }
     }
   }
@@ -992,7 +1085,7 @@ export class VortexEngine {
 
   private updateHover(): void {
     const ptr = this.pointer;
-    if (!ptr || this.dragging) {
+    if (!ptr || this.dragging || this.play.active) {
       this.setHover(null);
       return;
     }
