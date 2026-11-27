@@ -157,6 +157,7 @@ export class VortexEngine {
   private intensity = 1;
   private tMax = 2026;
   private splitTween = new Tween([0], TRANSITION_MS);
+  private groupTween = new Tween([0], TRANSITION_MS);
   private W = 0;
   private H = 0;
   private dpr = 1;
@@ -348,6 +349,9 @@ export class VortexEngine {
     }
     if (!prev || prev.layout !== next.layout) {
       this.splitTween.retarget([next.layout === 'split' ? 1 : 0], now);
+    }
+    if (!prev || prev.grouped !== next.grouped) {
+      this.groupTween.retarget([next.grouped ? 1 : 0], now);
     }
     if (!prev || prev.scale !== next.scale) {
       this.scaleTween.retarget(
@@ -660,8 +664,10 @@ export class VortexEngine {
     // km rings only make sense at true scale
     if (wR * wsR > 0.01) this.drawRings(wR * wsR, s);
     if (wDr > 0.01) this.drawDropAxis(wDr, wsF, s);
-    if (wT > 0.01) this.drawTimeAxis(wT, s);
-    if (wR > 0.01) this.drawRadialYears(wR, s);
+    // grouped: the chronological year ring / time axis no longer apply, so fade them out
+    const G = this.groupTween.value(now)[0];
+    if (wT * (1 - G) > 0.01) this.drawTimeAxis(wT * (1 - G), s);
+    if (wR * (1 - G) > 0.01) this.drawRadialYears(wR * (1 - G), s);
     if (wF > 0.01) this.drawFlowAxis(wF, s);
     if (s > 0.005) {
       const dx = Math.round(this.rect.x0 + this.rect.w / 2) + 0.5;
@@ -689,9 +695,11 @@ export class VortexEngine {
       // Equal-length position (centred on the equal-length extent) for every length mode
       const flowX0 = -dm.peqF / 2;
       const originX =
-        g.cx + wT * (g.t0x + p.tf * (g.t1x - g.t0x) - g.cx) + wF * flowX0;
-      const cr = p.cr;
-      const sr = p.sr;
+        g.cx + wT * (g.t0x + (p.tf + (0.5 - p.tf) * G) * (g.t1x - g.t0x) - g.cx) + wF * flowX0;
+      // radial: grouped removes the chronological rotation so every storm points the same way
+      const phi = p.tf * Math.PI * 2 * (1 - G);
+      const cr = Math.cos(phi);
+      const sr = Math.sin(phi);
       for (let i = 0; i < p.n; i++) {
         const rx = p.rx[i];
         const ry = p.ry[i];

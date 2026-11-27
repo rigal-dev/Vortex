@@ -60,6 +60,8 @@ export interface ViewState {
   mode: ViewMode;
   layout: LayoutMode;
   scale: ScaleMode;
+  /** Radial / timeline only: every storm shares one start point and heading. */
+  grouped: boolean;
   filters: FilterState;
 }
 

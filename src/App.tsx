@@ -168,6 +168,8 @@ export default function App() {
   const [status, setStatus] = useState<DataStatus>('loading');
   const [mode, setMode] = useState<ViewMode>('radial');
   const [layout, setLayout] = useState<LayoutMode>('unified');
+  // Grouped only applies to Radial and Timeline; it is disabled (and ignored) elsewhere.
+  const [grouped, setGrouped] = useState(false);
   const [scale, setScale] = useState<ScaleMode>('equal');
   const [basin, setBasin] = useState<BasinFilter>('all');
   const [yearMin, setYearMin] = useState(MIN_YEAR);
@@ -193,6 +195,9 @@ export default function App() {
     for (const c of data) if (c.season > max) max = c.season;
     return { min: MIN_YEAR, max };
   }, [data]);
+
+  const groupedAvailable = mode === 'radial' || mode === 'timeline';
+  const groupedOn = grouped && groupedAvailable;
 
   const filters: FilterState = useMemo(
     () => ({ basin, yearMin, yearMax, minSinuosity, categories }),
@@ -264,13 +269,13 @@ export default function App() {
   // Push data first, then view (filters need data present). Declared in this order on purpose.
   useEffect(() => {
     engineRef.current?.setData(data);
-    engineRef.current?.setView({ mode, layout, scale, filters });
+    engineRef.current?.setView({ mode, layout, scale, grouped: groupedOn, filters });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
   useEffect(() => {
-    engineRef.current?.setView({ mode, layout, scale, filters });
-  }, [mode, layout, scale, filters]);
+    engineRef.current?.setView({ mode, layout, scale, grouped: groupedOn, filters });
+  }, [mode, layout, scale, groupedOn, filters]);
 
   useEffect(() => {
     engineRef.current?.setIntensity(intensity);
@@ -475,6 +480,25 @@ export default function App() {
             <div className={`transition-opacity ${mode === 'map' ? 'opacity-35' : ''}`}>
               <Segmented label="Length" value={scale} options={SCALE_OPTIONS} onChange={setScale} />
             </div>
+            <button
+              id="btn-grouped"
+              type="button"
+              role="switch"
+              aria-checked={groupedOn}
+              disabled={!groupedAvailable}
+              onClick={() => setGrouped((g) => !g)}
+              title={groupedAvailable ? 'Group all storms at one start point and heading' : 'Available in Radial and Timeline'}
+              className={`flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-[11px] ring-1 transition ${
+                !groupedAvailable
+                  ? 'cursor-not-allowed text-slate-600 opacity-35 ring-white/10'
+                  : groupedOn
+                    ? 'bg-cyan-400/15 text-cyan-200 ring-cyan-400/60'
+                    : 'text-slate-400 ring-white/10 hover:text-white hover:ring-white/30'
+              }`}
+            >
+              <span>Grouped</span>
+              <span className="font-mono text-[10px]">{groupedOn ? 'ON' : 'OFF'}</span>
+            </button>
             <p className="text-[10px] leading-snug text-slate-500">
               {mode === 'map'
                 ? 'Map shows true geography; length modes apply to the other views.'
