@@ -51,7 +51,6 @@ export interface FilterState {
   yearMin: number;
   yearMax: number;
   /** tracks with sinuosity below this are hidden */
-  minSinuosity: number;
   /** Saffir-Simpson categories to show */
   categories: readonly Category[];
 }
@@ -60,8 +59,6 @@ export interface ViewState {
   mode: ViewMode;
   layout: LayoutMode;
   scale: ScaleMode;
-  /** Radial / timeline only: every storm shares one start point and heading. */
-  grouped: boolean;
   filters: FilterState;
 }
 

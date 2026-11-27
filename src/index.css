@@ -80,3 +80,26 @@ input[type='range'].vx-range:focus-visible {
 #root {
   height: 100dvh;
 }
+
+/* Dual-handle range: two stacked inputs; only the thumbs take pointer events */
+.vx-dual {
+  position: relative;
+  height: 18px;
+}
+.vx-dual input[type='range'].vx-range {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.vx-dual input[type='range'].vx-range::-webkit-slider-runnable-track {
+  background: transparent;
+}
+.vx-dual input[type='range'].vx-range::-moz-range-track {
+  background: transparent;
+}
+.vx-dual input[type='range'].vx-range::-webkit-slider-thumb {
+  pointer-events: auto;
+}
+.vx-dual input[type='range'].vx-range::-moz-range-thumb {
+  pointer-events: auto;
+}

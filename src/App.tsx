@@ -168,13 +168,10 @@ export default function App() {
   const [status, setStatus] = useState<DataStatus>('loading');
   const [mode, setMode] = useState<ViewMode>('radial');
   const [layout, setLayout] = useState<LayoutMode>('unified');
-  // Grouped only applies to Radial and Timeline; it is disabled (and ignored) elsewhere.
-  const [grouped, setGrouped] = useState(false);
   const [scale, setScale] = useState<ScaleMode>('equal');
   const [basin, setBasin] = useState<BasinFilter>('all');
   const [yearMin, setYearMin] = useState(MIN_YEAR);
   const [yearMax, setYearMax] = useState(CURRENT_YEAR);
-  const [minSinuosity, setMinSinuosity] = useState(1);
   const [categories, setCategories] = useState<readonly Category[]>(CATEGORIES);
   const [intensity, setIntensity] = useState(1);
   // Mobile only: which panes are visible (desktop always shows both).
@@ -196,12 +193,9 @@ export default function App() {
     return { min: MIN_YEAR, max };
   }, [data]);
 
-  const groupedAvailable = mode === 'radial' || mode === 'timeline';
-  const groupedOn = grouped && groupedAvailable;
-
   const filters: FilterState = useMemo(
-    () => ({ basin, yearMin, yearMax, minSinuosity, categories }),
-    [basin, yearMin, yearMax, minSinuosity, categories],
+    () => ({ basin, yearMin, yearMax, categories }),
+    [basin, yearMin, yearMax, categories],
   );
 
   // Engine lifecycle
@@ -269,13 +263,13 @@ export default function App() {
   // Push data first, then view (filters need data present). Declared in this order on purpose.
   useEffect(() => {
     engineRef.current?.setData(data);
-    engineRef.current?.setView({ mode, layout, scale, grouped: groupedOn, filters });
+    engineRef.current?.setView({ mode, layout, scale, filters });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
   useEffect(() => {
-    engineRef.current?.setView({ mode, layout, scale, grouped: groupedOn, filters });
-  }, [mode, layout, scale, groupedOn, filters]);
+    engineRef.current?.setView({ mode, layout, scale, filters });
+  }, [mode, layout, scale, filters]);
 
   useEffect(() => {
     engineRef.current?.setIntensity(intensity);
@@ -480,25 +474,6 @@ export default function App() {
             <div className={`transition-opacity ${mode === 'map' ? 'opacity-35' : ''}`}>
               <Segmented label="Length" value={scale} options={SCALE_OPTIONS} onChange={setScale} />
             </div>
-            <button
-              id="btn-grouped"
-              type="button"
-              role="switch"
-              aria-checked={groupedOn}
-              disabled={!groupedAvailable}
-              onClick={() => setGrouped((g) => !g)}
-              title={groupedAvailable ? 'Group storms by year: one shared start and heading per year' : 'Available in Radial and Timeline'}
-              className={`flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-[11px] ring-1 transition ${
-                !groupedAvailable
-                  ? 'cursor-not-allowed text-slate-600 opacity-35 ring-white/10'
-                  : groupedOn
-                    ? 'bg-cyan-400/15 text-cyan-200 ring-cyan-400/60'
-                    : 'text-slate-400 ring-white/10 hover:text-white hover:ring-white/30'
-              }`}
-            >
-              <span>Grouped</span>
-              <span className="font-mono text-[10px]">{groupedOn ? 'ON' : 'OFF'}</span>
-            </button>
             <p className="text-[10px] leading-snug text-slate-500">
               {mode === 'map'
                 ? 'Map shows true geography; length modes apply to the other views.'
@@ -579,31 +554,42 @@ export default function App() {
           </Section>
 
           <Section title="Temporal range">
-            <div className="flex items-baseline justify-between font-mono text-xs text-slate-300">
-              <span>{yearMin}</span>
-              <span className="text-slate-600">→</span>
-              <span>{yearMax}</span>
+            {/* One row: lower bound · single timeline with two handles · upper bound */}
+            <div className="flex items-center gap-3 font-mono text-xs text-slate-300">
+              <span className="w-9 text-right">{yearMin}</span>
+              <div className="vx-dual flex-1">
+                <div className="absolute left-0 right-0 top-1/2 h-[2px] -translate-y-1/2 rounded-full bg-white/15" />
+                <div
+                  className="absolute top-1/2 h-[2px] -translate-y-1/2 rounded-full bg-cyan-400/70"
+                  style={{
+                    left: `calc(6px + (100% - 12px) * ${(yearMin - yearBounds.min) / Math.max(1, yearBounds.max - yearBounds.min)})`,
+                    right: `calc(6px + (100% - 12px) * ${1 - (yearMax - yearBounds.min) / Math.max(1, yearBounds.max - yearBounds.min)})`,
+                  }}
+                />
+                <input
+                  id="slider-year-min"
+                  aria-label="Earliest season"
+                  type="range"
+                  className="vx-range"
+                  style={{ zIndex: yearMin >= yearBounds.max - 1 ? 2 : 1 }}
+                  min={yearBounds.min}
+                  max={yearBounds.max}
+                  value={yearMin}
+                  onChange={(e) => onYearMin(+e.target.value)}
+                />
+                <input
+                  id="slider-year-max"
+                  aria-label="Latest season"
+                  type="range"
+                  className="vx-range"
+                  min={yearBounds.min}
+                  max={yearBounds.max}
+                  value={yearMax}
+                  onChange={(e) => onYearMax(+e.target.value)}
+                />
+              </div>
+              <span className="w-9">{yearMax}</span>
             </div>
-            <input
-              id="slider-year-min"
-              aria-label="Earliest season"
-              type="range"
-              className="vx-range"
-              min={yearBounds.min}
-              max={yearBounds.max}
-              value={yearMin}
-              onChange={(e) => onYearMin(+e.target.value)}
-            />
-            <input
-              id="slider-year-max"
-              aria-label="Latest season"
-              type="range"
-              className="vx-range"
-              min={yearBounds.min}
-              max={yearBounds.max}
-              value={yearMax}
-              onChange={(e) => onYearMax(+e.target.value)}
-            />
           </Section>
 
           <Section title="Category">
@@ -634,49 +620,35 @@ export default function App() {
             </div>
           </Section>
 
-          <Section title="Sinuosity threshold">
-            <div className="flex items-baseline justify-between font-mono text-xs text-slate-300">
-              <span>≥ {minSinuosity.toFixed(2)}</span>
-              <span className="text-slate-600">curved / straight</span>
-            </div>
-            <input
-              id="slider-sinuosity"
-              aria-label="Minimum track sinuosity"
-              type="range"
-              className="vx-range"
-              min={1}
-              max={2.5}
-              step={0.05}
-              value={minSinuosity}
-              onChange={(e) => setMinSinuosity(+e.target.value)}
-            />
-          </Section>
-
           <Section title="Line intensity">
-            <div className="flex items-baseline justify-between font-mono text-xs text-slate-300">
-              <span>{intensity === 1 ? 'auto' : `${intensity.toFixed(2)}×`}</span>
-              <span className="text-slate-600">softer ↔ brighter</span>
+            {/* One row: scale ends, slider and numeric value */}
+            <div className="flex items-center gap-2 font-mono text-[10px] text-slate-500">
+              <span>softer</span>
+              <input
+                id="slider-intensity"
+                aria-label="Line intensity"
+                type="range"
+                className="vx-range min-w-0 flex-1"
+                min={0.3}
+                max={1.8}
+                step={0.05}
+                value={intensity}
+                onChange={(e) => setIntensity(+e.target.value)}
+                onDoubleClick={() => setIntensity(1)}
+              />
+              <span>brighter</span>
+              <span className="w-10 text-right text-xs text-slate-300">
+                {intensity === 1 ? 'auto' : `${intensity.toFixed(2)}×`}
+              </span>
             </div>
-            <input
-              id="slider-intensity"
-              aria-label="Line intensity"
-              type="range"
-              className="vx-range"
-              min={0.3}
-              max={1.8}
-              step={0.05}
-              value={intensity}
-              onChange={(e) => setIntensity(+e.target.value)}
-              onDoubleClick={() => setIntensity(1)}
-            />
           </Section>
 
           <footer className="space-y-2.5 border-t border-white/10 pt-4">
-            <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+            <div className="flex items-center justify-between gap-2">
               {LEGEND.map((l) => (
-                <div key={l.label} className="flex items-center gap-2 text-[10px] text-slate-400">
+                <div key={l.label} className="flex items-center gap-1.5 whitespace-nowrap text-[10px] text-slate-400">
                   <span
-                    className="h-[3px] w-5 rounded-full"
+                    className="h-[3px] w-3 rounded-full"
                     style={{ background: l.color, boxShadow: `0 0 8px ${l.color}` }}
                   />
                   {l.label}
