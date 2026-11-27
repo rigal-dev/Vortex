@@ -96,7 +96,7 @@ function Segmented<T extends string>({ label, value, options, onChange }: Segmen
               compact ? 'px-1 text-[10.5px] tracking-normal' : 'px-2 text-[11px] tracking-wide'
             } ${
               active
-                ? 'bg-white/90 text-[#08090C] shadow-[0_0_14px_rgba(255,255,255,0.25)]'
+                ? 'bg-slate-500/45 text-slate-100'
                 : 'text-slate-400 hover:bg-white/5 hover:text-white'
             }`}
           >
@@ -432,7 +432,7 @@ export default function App() {
             title={o.label}
             onClick={() => setPane(o.value)}
             className={`flex h-6 w-7 items-center justify-center rounded [&>svg]:h-3.5 [&>svg]:w-3.5 transition ${
-              pane === o.value ? 'bg-white/90 text-[#08090C]' : 'text-slate-400 hover:bg-white/10 hover:text-white'
+              pane === o.value ? 'bg-slate-500/45 text-slate-100' : 'text-slate-400 hover:bg-white/10 hover:text-white'
             }`}
           >
             {o.icon}
