@@ -487,7 +487,7 @@ export default function App() {
               aria-checked={groupedOn}
               disabled={!groupedAvailable}
               onClick={() => setGrouped((g) => !g)}
-              title={groupedAvailable ? 'Group all storms at one start point and heading' : 'Available in Radial and Timeline'}
+              title={groupedAvailable ? 'Group storms by year: one shared start and heading per year' : 'Available in Radial and Timeline'}
               className={`flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-[11px] ring-1 transition ${
                 !groupedAvailable
                   ? 'cursor-not-allowed text-slate-600 opacity-35 ring-white/10'

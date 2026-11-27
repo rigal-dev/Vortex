@@ -664,10 +664,10 @@ export class VortexEngine {
     // km rings only make sense at true scale
     if (wR * wsR > 0.01) this.drawRings(wR * wsR, s);
     if (wDr > 0.01) this.drawDropAxis(wDr, wsF, s);
-    // grouped: the chronological year ring / time axis no longer apply, so fade them out
+    // grouped: storms of the same year share one start point and heading (0 = off, 1 = on)
     const G = this.groupTween.value(now)[0];
-    if (wT * (1 - G) > 0.01) this.drawTimeAxis(wT * (1 - G), s);
-    if (wR * (1 - G) > 0.01) this.drawRadialYears(wR * (1 - G), s);
+    if (wT > 0.01) this.drawTimeAxis(wT, s);
+    if (wR > 0.01) this.drawRadialYears(wR, s);
     if (wF > 0.01) this.drawFlowAxis(wF, s);
     if (s > 0.005) {
       const dx = Math.round(this.rect.x0 + this.rect.w / 2) + 0.5;
@@ -694,10 +694,13 @@ export class VortexEngine {
       // timeline: anchored on the time axis at genesis date; flow: genesis fixed at the
       // Equal-length position (centred on the equal-length extent) for every length mode
       const flowX0 = -dm.peqF / 2;
+      // grouped: collapse genesis time to the start of its year (shared start + heading per year)
+      const tfY = (Math.floor(p.t) - this.tMin) / (this.tMax - this.tMin);
+      const tfG = p.tf + (tfY - p.tf) * G;
       const originX =
-        g.cx + wT * (g.t0x + (p.tf + (0.5 - p.tf) * G) * (g.t1x - g.t0x) - g.cx) + wF * flowX0;
-      // radial: grouped removes the chronological rotation so every storm points the same way
-      const phi = p.tf * Math.PI * 2 * (1 - G);
+        g.cx + wT * (g.t0x + tfG * (g.t1x - g.t0x) - g.cx) + wF * flowX0;
+      // radial: grouped snaps each storm's rotation to the start of its year
+      const phi = tfG * Math.PI * 2;
       const cr = Math.cos(phi);
       const sr = Math.sin(phi);
       for (let i = 0; i < p.n; i++) {
