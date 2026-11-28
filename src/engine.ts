@@ -4,6 +4,7 @@ import {
   categoryOf,
   type Cyclone,
   type ScaleMode,
+  type SplitKey,
   type ViewMode,
   type ViewState,
 } from './types';
@@ -16,6 +17,9 @@ const MODES: readonly ViewMode[] = ['radial', 'drop', 'map', 'timeline', 'flow']
 const SCALES: readonly ScaleMode[] = ['real', 'equal', 'fixed'];
 const MIN_ZOOM = 0.4;
 const MAX_ZOOM = 40;
+const MAX_PANELS = 6;
+const BASIN_ORDER = ['WP', 'EP', 'NA', 'NI', 'SI', 'SP'] as const;
+const BASIN_LABELS = ['WESTERN PACIFIC', 'EASTERN PACIFIC', 'NORTH ATLANTIC', 'NORTH INDIAN', 'SOUTH INDIAN', 'SOUTH PACIFIC'];
 
 /** Space (px) reserved around the visualization, e.g. for the docked control panel. */
 export interface Insets {
@@ -103,6 +107,8 @@ interface Prepared {
   c: Cyclone;
   n: number;
   hemi: 0 | 1;
+  grp: number; // panel index in the Split layout
+  pgrp: number; // previous panel index (used while moving between two splits)
   dx: Float32Array;
   dy: Float32Array;
   rx: Float32Array;
@@ -123,6 +129,20 @@ interface Prepared {
   target: boolean; // passes filters
   sx: Float32Array;
   sy: Float32Array;
+}
+
+interface Dim {
+  k: number;
+  kF: number;
+  mk: number;
+  peqR: number;
+  pfxR: number;
+  peqD: number;
+  pfxD: number;
+  peqT: number;
+  pfxT: number;
+  peqF: number;
+  pfxF: number;
 }
 
 interface Geo {
@@ -167,7 +187,27 @@ export class VortexEngine {
   private hovered: Prepared | null = null;
   private hoverDim = 0;
   private lastCount = -1;
-  private geos: [Geo, Geo] = [this.blankGeo(), this.blankGeo()];
+  private geos: Geo[] = Array.from({ length: MAX_PANELS }, () => this.blankGeo());
+  /** Layout currently applied (changes only once a collapse back to unified has finished) vs requested. */
+  private curLayout: { split: boolean; key: SplitKey } = { split: false, key: 'hemisphere' };
+  private wantLayout: { split: boolean; key: SplitKey } = { split: false, key: 'hemisphere' };
+  private splitTarget = 0;
+  private nGroups = 2;
+  /** Seamless move between two different splits: storms glide from their old panel to the new one. */
+  private swapActive = false;
+  private swapTween = new Tween([0], TRANSITION_MS);
+  private prevSnap = {
+    n: 2,
+    labels: [] as string[],
+    geos: Array.from({ length: MAX_PANELS }, () => ({ cx: 0, oy: 0, cy: 0, vw: 1, k: 1, mk: 1, len: 1, t0x: 0, t1x: 1 }) as Geo),
+    dim: { k: 1, kF: 1, mk: 1, peqR: 1, pfxR: 1, peqD: 1, pfxD: 1, peqT: 1, pfxT: 1, peqF: 1, pfxF: 1 } as Dim,
+    grid: { cols: 2, rows: 1 },
+  };
+  private scratchGeo: Geo = { cx: 0, oy: 0, cy: 0, vw: 1, k: 1, mk: 1, len: 1, t0x: 0, t1x: 1 };
+  private scratchDim: Dim = { k: 1, kF: 1, mk: 1, peqR: 1, pfxR: 1, peqD: 1, pfxD: 1, peqT: 1, pfxT: 1, peqF: 1, pfxF: 1 };
+  private panelLabels: string[] = ['NORTHERN HEMISPHERE', 'SOUTHERN HEMISPHERE'];
+  private grid = { cols: 2, rows: 1 };
+  private splitStats = { sin: [1, 1.5], dur: [5, 8], lat: [12, 20] };
   private cam: Camera = { z: 1, tx: 0, ty: 0 };
   private camTarget: Camera = { z: 1, tx: 0, ty: 0 };
   private pointers = new Map<number, { x: number; y: number }>();
@@ -185,7 +225,7 @@ export class VortexEngine {
   private play = { active: false, running: false, clock: 0, t1: 0, rate: 1.5, dur: 2.2, month: -1 };
   private shiftTarget = 0;
   /** Per-frame pixel sizing shared by both hemisphere viewports. */
-  private dim = {
+  private dim: Dim = {
     k: 1,
     kF: 1,
     mk: 1,
@@ -307,6 +347,8 @@ export class VortexEngine {
   setData(cyclones: Cyclone[]): void {
     this.storms = cyclones.map((c) => this.prepare(c));
     this.intro = this.storms.length > 0 ? 0 : 1;
+    this.computeSplitStats();
+    this.assignGroups(this.curLayout.key);
     // 90th-percentile farthest reach (km) of a track from its genesis: real-length scale is
     // fitted to this so most storms stay on screen instead of spilling over the edges.
     const reach = this.storms
@@ -346,9 +388,8 @@ export class VortexEngine {
     if (!prev || prev.mode !== next.mode) {
       this.weightTween.retarget(MODES.map((m) => (m === next.mode ? 1 : 0)), now);
     }
-    if (!prev || prev.layout !== next.layout) {
-      this.splitTween.retarget([next.layout === 'split' ? 1 : 0], now);
-    }
+    this.wantLayout = { split: next.layout === 'split', key: next.splitBy };
+    this.reconcileLayout(now);
     if (!prev || prev.scale !== next.scale) {
       this.scaleTween.retarget(
         SCALES.map((sc) => (sc === next.scale ? 1 : 0)),
@@ -356,8 +397,135 @@ export class VortexEngine {
       );
     }
     // Geometry changes drastically between modes/layouts, so glide the camera home.
-    if (prev && (prev.mode !== next.mode || prev.layout !== next.layout)) this.resetCamera();
+    if (prev && (prev.mode !== next.mode || prev.layout !== next.layout || prev.splitBy !== next.splitBy)) {
+      this.resetCamera();
+    }
     this.applyFilters();
+  }
+
+  private computeSplitStats(): void {
+    const tert = (vals: number[]): number[] => {
+      if (vals.length === 0) return [0, 0];
+      const v = vals.slice().sort((a, b) => a - b);
+      return [v[Math.floor(v.length / 3)], v[Math.floor((2 * v.length) / 3)]];
+    };
+    this.splitStats = {
+      sin: tert(this.storms.map((p) => p.c.sinuosity)),
+      dur: tert(this.storms.map((p) => (p.n - 1) / 4)),
+      lat: tert(this.storms.map((p) => Math.abs(p.c.lat[0]))),
+    };
+  }
+
+  /** Assigns every storm to a Split panel for the given key and sets the panel labels. */
+  private assignGroups(key: SplitKey): void {
+    const st = this.splitStats;
+    const tertile = (v: number, t: number[]): number => (v < t[0] ? 0 : v < t[1] ? 1 : 2);
+    const days = (p: Prepared): number => (p.n - 1) / 4;
+    const latOf = (p: Prepared): number => Math.abs(p.c.lat[0]);
+    const rapid = (p: Prepared): number => {
+      for (let i = 0; i + 4 < p.n; i++) if (p.wind[i + 4] - p.wind[i] >= 30) return 0;
+      return 1;
+    };
+    let labels: string[];
+    let fn: (p: Prepared) => number;
+    switch (key) {
+      case 'basin':
+        labels = BASIN_LABELS;
+        fn = (p) => Math.max(0, BASIN_ORDER.indexOf(p.c.basin as (typeof BASIN_ORDER)[number]));
+        break;
+      case 'category':
+        labels = ['CATEGORY 3', 'CATEGORY 4', 'CATEGORY 5'];
+        fn = (p) => categoryOf(p.c.peak_wind) - 3;
+        break;
+      case 'era':
+        labels = ['1980S', '1990S', '2000S', '2010S +'];
+        fn = (p) => (p.c.season < 1990 ? 0 : p.c.season < 2000 ? 1 : p.c.season < 2010 ? 2 : 3);
+        break;
+      case 'season':
+        labels = ['JAN – MAR', 'APR – JUN', 'JUL – SEP', 'OCT – DEC'];
+        fn = (p) => Math.min(3, Math.floor((p.t - Math.floor(p.t)) * 4));
+        break;
+      case 'latitude':
+        labels = [
+          `GENESIS < ${st.lat[0].toFixed(0)}° LAT`,
+          `${st.lat[0].toFixed(0)}° – ${st.lat[1].toFixed(0)}° LAT`,
+          `GENESIS > ${st.lat[1].toFixed(0)}° LAT`,
+        ];
+        fn = (p) => tertile(latOf(p), st.lat);
+        break;
+      case 'sinuosity':
+        labels = [`STRAIGHT (< ${st.sin[0].toFixed(2)})`, 'CURVED', `LOOPING (> ${st.sin[1].toFixed(2)})`];
+        fn = (p) => tertile(p.c.sinuosity, st.sin);
+        break;
+      case 'duration':
+        labels = [`SHORT (< ${st.dur[0].toFixed(0)} DAYS)`, 'MEDIUM', `LONG (> ${st.dur[1].toFixed(0)} DAYS)`];
+        fn = (p) => tertile(days(p), st.dur);
+        break;
+      case 'intensification':
+        labels = ['RAPID INTENSIFICATION', 'STEADY'];
+        fn = rapid;
+        break;
+      default:
+        labels = ['NORTHERN HEMISPHERE', 'SOUTHERN HEMISPHERE'];
+        fn = (p) => p.hemi;
+    }
+    for (const p of this.storms) {
+      p.grp = Math.min(labels.length - 1, Math.max(0, fn(p)));
+      p.pgrp = p.grp;
+    }
+    this.panelLabels = labels;
+    this.nGroups = labels.length;
+  }
+
+  /** Like assignGroups, but leaves each storm's previous panel (pgrp) untouched. */
+  private assignGroupsKeepPrev(key: SplitKey): void {
+    const prev = this.storms.map((p) => p.pgrp);
+    this.assignGroups(key);
+    this.storms.forEach((p, i) => (p.pgrp = prev[i]));
+  }
+
+  /**
+   * Applies the requested layout. Switching between two different splits first collapses back to
+   * the unified view, then regroups and expands again, so storms never jump between panels.
+   */
+  private reconcileLayout(now: number): void {
+    const cur = this.curLayout;
+    const want = this.wantLayout;
+    const setTarget = (v: number): void => {
+      if (this.splitTarget !== v) {
+        this.splitTarget = v;
+        this.splitTween.retarget([v], now);
+      }
+    };
+    const same = cur.split === want.split && (!want.split || cur.key === want.key);
+    if (same) {
+      setTarget(cur.split ? 1 : 0);
+      return;
+    }
+    if (cur.split && want.split) {
+      // split -> different split: glide every storm straight to its new panel (no collapse)
+      const ps = this.prevSnap;
+      ps.n = this.nGroups;
+      ps.labels = this.panelLabels;
+      for (const p of this.storms) p.pgrp = p.grp;
+      this.assignGroupsKeepPrev(want.key);
+      this.curLayout = { split: true, key: want.key };
+      this.swapTween = new Tween([0], TRANSITION_MS);
+      this.swapTween.retarget([1], now);
+      this.swapActive = true;
+      return;
+    }
+    if (cur.split) {
+      setTarget(0);
+      if (this.splitTween.value(now)[0] > 0.003) return;
+      if (!want.split) {
+        this.curLayout = { split: false, key: cur.key };
+        return;
+      }
+    }
+    this.curLayout = { split: want.split, key: want.split ? want.key : cur.key };
+    if (want.split) this.assignGroups(want.key);
+    setTarget(want.split ? 1 : 0);
   }
 
   /** Multiplier on track opacity (1 = automatic density-based default). */
@@ -487,6 +655,8 @@ export class VortexEngine {
       c,
       n,
       hemi: c.hemi === 'N' ? 0 : 1,
+      grp: 0,
+      pgrp: 0,
       dx: Float32Array.from(c.dx),
       dy: Float32Array.from(c.dy),
       rx: Float32Array.from(c.rx),
@@ -564,6 +734,7 @@ export class VortexEngine {
     this.hoverDim += ((this.hovered ? 1 : 0) - this.hoverDim) * (1 - Math.exp(-dt * 10));
     this.shift += (this.shiftTarget - this.shift) * (1 - Math.exp(-dt * 10));
     if (Math.abs(this.shiftTarget - this.shift) < 0.05) this.shift = this.shiftTarget;
+    this.reconcileLayout(performance.now());
     if (this.intro < 1) this.intro = Math.min(1, this.intro + dt / 1.5);
     const pl = this.play;
     if (pl.active && pl.running) {
@@ -599,36 +770,63 @@ export class VortexEngine {
     const left = this.insets.left + this.shift;
     const Vw = Math.max(240, this.W - left - right);
     const Vh = Math.max(240, this.H - top - bottom);
-    const cyc = top + Vh / 2;
     this.rect = { x0: left, y0: top, w: Vw, h: Vh };
+    this.grid = this.fillLayout(this.nGroups, s, w, this.geos, this.dim);
+    if (this.swapActive) {
+      this.prevSnap.grid = this.fillLayout(this.prevSnap.n, s, w, this.prevSnap.geos, this.prevSnap.dim);
+      if (this.swapTween.value(now)[0] >= 0.999) this.swapActive = false;
+    }
+    return { w, s, ws };
+  }
 
-    const vw = lerp(Vw, Vw / 2, s);
-    const m = Math.min(vw, Vh);
-    const dropH = Math.min(Vh, vw * 1.3);
-    const d = this.dim;
+  /** Lays out n panels on a near-square grid, writing per-panel geometry and shared pixel sizing. */
+  private fillLayout(n: number, s: number, w: number[], geos: Geo[], d: Dim): { cols: number; rows: number } {
+    const { x0: left, y0: top, w: Vw, h: Vh } = this.rect;
+    const cyc = top + Vh / 2;
+    let cols = 1;
+    let rows = 1;
+    if (n > 1) {
+      let best = Infinity;
+      for (let c = 1; c <= n; c++) {
+        const r = Math.ceil(n / c);
+        const score = Math.abs(Math.log(Vw / c / (Vh / r))) + 0.5 * (c * r - n);
+        if (score < best) {
+          best = score;
+          cols = c;
+          rows = r;
+        }
+      }
+    }
+    const vw = lerp(Vw, Vw / cols, s);
+    const ch = lerp(Vh, Vh / rows, s);
+    const m = Math.min(vw, ch);
+    const dropH = Math.min(ch, vw * 1.3);
     // flow: tracks run left -> right from a fixed start near the viewer's left edge
     const flowPad = Math.min(56, vw * 0.09);
     const flowSpan = Math.max(100, vw - 2 * flowPad - 16);
     // real: fit the 90th-percentile track reach inside the tightest layout so most of the
     // shape stays in the canvas (rings stay to scale: they use the same px/km).
-    d.k = Math.min(0.36 * m, 0.55 * dropH, 0.6 * Vh, 0.8 * flowSpan) / this.reach90;
+    d.k = Math.min(0.36 * m, 0.55 * dropH, 0.6 * ch, 0.8 * flowSpan) / this.reach90;
     d.kF = (0.42 * m * FLOW_ZOOM) / 2000; // flow real: original fixed scale (2000 km = 42% of the viewer)
     d.mk = (vw * 0.94) / 360;
     d.peqR = 0.36 * m; // equal length: total path length in px
     d.pfxR = 0.3 * m; // fixed ends: genesis->dissipation distance in px
     d.peqD = 0.68 * dropH;
     d.pfxD = 0.58 * dropH;
-    d.peqT = 0.7 * Vh; // timeline: tracks rise from the baseline
-    d.pfxT = 0.6 * Vh;
+    d.peqT = 0.7 * ch; // timeline: tracks rise from the baseline
+    d.pfxT = 0.6 * ch;
     d.peqF = 0.62 * flowSpan * FLOW_ZOOM;
     d.pfxF = 0.5 * flowSpan * FLOW_ZOOM;
 
-    for (let h = 0; h < 2; h++) {
-      const g = this.geos[h];
-      g.cx = left + lerp(Vw / 2, Vw * (h === 0 ? 0.25 : 0.75), s);
-      g.cy = cyc;
+    for (let h = 0; h < MAX_PANELS; h++) {
+      const g = geos[h];
+      const col = h % cols;
+      const row = Math.floor(h / cols);
+      g.cx = left + lerp(Vw / 2, ((col + 0.5) * Vw) / cols, s);
+      const pcy = lerp(cyc, top + ((row + 0.5) * Vh) / rows, s);
+      g.cy = pcy;
       // radial: centred; drop: genesis low so the axis is centred; timeline: baseline low
-      g.oy = cyc + w[1] * 0.3 * dropH + w[3] * 0.36 * Vh;
+      g.oy = pcy + w[1] * 0.3 * dropH + w[3] * 0.36 * ch;
       g.vw = vw;
       g.k = d.k;
       g.mk = d.mk;
@@ -636,7 +834,26 @@ export class VortexEngine {
       g.t0x = g.cx - vw / 2 + flowPad;
       g.t1x = g.cx + vw / 2 - flowPad;
     }
-    return { w, s, ws };
+    return { cols, rows };
+  }
+
+  private blendGeo(out: Geo, a: Geo, b: Geo, e: number): Geo {
+    out.cx = lerp(a.cx, b.cx, e);
+    out.oy = lerp(a.oy, b.oy, e);
+    out.cy = lerp(a.cy, b.cy, e);
+    out.vw = lerp(a.vw, b.vw, e);
+    out.k = lerp(a.k, b.k, e);
+    out.mk = lerp(a.mk, b.mk, e);
+    out.len = lerp(a.len, b.len, e);
+    out.t0x = lerp(a.t0x, b.t0x, e);
+    out.t1x = lerp(a.t1x, b.t1x, e);
+    return out;
+  }
+
+  private blendDim(a: Dim, b: Dim, e: number): Dim {
+    const o = this.scratchDim;
+    (Object.keys(o) as (keyof Dim)[]).forEach((k) => (o[k] = lerp(a[k], b[k], e)));
+    return o;
   }
 
   // ---------- rendering ----------
@@ -647,7 +864,9 @@ export class VortexEngine {
     const [wR, wDr, wM, wT, wF] = w;
     const [wsR, wsE, wsF] = ws;
     const { z, tx, ty } = this.cam;
-    const dm = this.dim;
+    const swapE = this.swapActive ? this.swapTween.value(now)[0] : 1;
+    const ax = swapE; // guides fade in once storms have moved to their new panels
+    const dm = this.swapActive ? this.blendDim(this.prevSnap.dim, this.dim, swapE) : this.dim;
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.globalCompositeOperation = 'source-over';
@@ -655,29 +874,27 @@ export class VortexEngine {
     ctx.fillStyle = BG;
     ctx.fillRect(0, 0, W, H);
 
-    if (wM > 0.01) this.drawLand(wM, s);
+    if (wM * ax > 0.01) this.drawLand(wM * ax, s);
     // km rings only make sense at true scale
-    if (wR * wsR > 0.01) this.drawRings(wR * wsR, s);
-    if (wDr > 0.01) this.drawDropAxis(wDr, wsF, s);
-    if (wT > 0.01) this.drawTimeAxis(wT, s);
-    if (wR > 0.01) this.drawRadialYears(wR, s);
-    if (wF > 0.01) this.drawFlowAxis(wF, s);
+    if (wR * wsR * ax > 0.01) this.drawRings(wR * wsR * ax, s);
+    if (wDr * ax > 0.01) this.drawDropAxis(wDr * ax, wsF, s);
+    if (wT * ax > 0.01) this.drawTimeAxis(wT * ax, s);
+    if (wR * ax > 0.01) this.drawRadialYears(wR * ax, s);
+    if (wF * ax > 0.01) this.drawFlowAxis(wF * ax, s);
     if (s > 0.005) {
-      const dx = Math.round(this.rect.x0 + this.rect.w / 2) + 0.5;
-      ctx.globalAlpha = s * 0.5;
-      ctx.strokeStyle = '#94A3B8';
-      ctx.lineWidth = 1 / dpr + 0.25;
-      ctx.beginPath();
-      ctx.moveTo(dx, 0);
-      ctx.lineTo(dx, H);
-      ctx.stroke();
-      this.drawHemiLabels(s);
+      this.drawPanelChrome(s * ax, this.grid, this.panelLabels, this.geos, this.nGroups, W, H, dpr);
+      if (this.swapActive) {
+        const ps = this.prevSnap;
+        this.drawPanelChrome(s * (1 - swapE), ps.grid, ps.labels, ps.geos, ps.n, W, H, dpr);
+      }
     }
 
     // project all visible storms
     for (const p of this.storms) {
       if (p.alpha < 0.003) continue;
-      const g = this.geos[p.hemi];
+      const g = this.swapActive
+        ? this.blendGeo(this.scratchGeo, this.prevSnap.geos[p.pgrp], this.geos[p.grp], swapE)
+        : this.geos[p.grp];
       const mk = g.mk;
       // px per km for this storm in each km-based mode (real / equal length / fixed ends)
       const mR = wsR * dm.k + wsE * (dm.peqR / p.total) + wsF * (dm.pfxR / p.straight);
@@ -729,17 +946,24 @@ export class VortexEngine {
     // (≈ full strength for ~220 tracks or fewer; ~0.41x at ~1,100 tracks).
     const density = clamp01(Math.pow(220 / Math.max(this.lastCount, 1), 0.55));
     const lineScale = Math.max(0.3, density) * this.intensity * 1.12;
-    // In split layout each hemisphere is clipped to its own half, so tracks never cross the
-    // divider and the two sides stay totally distinct (even when zoomed or panned).
-    const splitX = Math.round(this.rect.x0 + this.rect.w / 2) + 0.5;
-    const clipSplit = s > 0.02;
-    const clipTo = (hemi: number): void => {
+    // In split layout each panel is clipped to its own cell, so tracks never cross a divider
+    // and the panels stay totally distinct (even when zoomed or panned). Outer cells extend to
+    // the canvas edge so nothing is cut off by the viewer margins.
+    const clipSplit = s > 0.02 && !this.swapActive;
+    const clipTo = (h: number): void => {
+      const { cols, rows } = this.grid;
+      const r = this.rect;
+      const col = h % cols;
+      const row = Math.floor(h / cols);
+      const x0 = col === 0 ? 0 : r.x0 + (col * r.w) / cols;
+      const x1 = col === cols - 1 ? W : r.x0 + ((col + 1) * r.w) / cols;
+      const y0 = row === 0 ? 0 : r.y0 + (row * r.h) / rows;
+      const y1 = row === rows - 1 ? H : r.y0 + ((row + 1) * r.h) / rows;
       ctx.beginPath();
-      if (hemi === 0) ctx.rect(0, 0, splitX, H);
-      else ctx.rect(splitX, 0, W - splitX, H);
+      ctx.rect(x0, y0, x1 - x0, y1 - y0);
       ctx.clip();
     };
-    for (let h = 0; h < 2; h++) {
+    for (let h = 0; h < this.nGroups; h++) {
       if (clipSplit) {
         ctx.save();
         clipTo(h);
@@ -753,7 +977,7 @@ export class VortexEngine {
     if (hp && hp.alpha > 0.003) {
       if (clipSplit) {
         ctx.save();
-        clipTo(hp.hemi);
+        clipTo(hp.grp);
       }
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
@@ -790,7 +1014,7 @@ export class VortexEngine {
     const pl = this.play;
     const durY = pl.dur * pl.rate;
     for (const p of this.storms) {
-      if (p.hemi !== hemi || p.alpha < 0.003 || p === this.hovered) continue;
+      if (p.grp !== hemi || p.alpha < 0.003 || p === this.hovered) continue;
       // playback: draw each track progressively from its genesis time, glowing while it grows
       let level = 1;
       let lastSeg = p.n - 1;
@@ -845,7 +1069,7 @@ export class VortexEngine {
     ctx.lineWidth = 1;
     ctx.font = '10px "JetBrains Mono", ui-monospace, monospace';
     ctx.textBaseline = 'bottom';
-    for (let h = 0; h < 2; h++) {
+    for (let h = 0; h < this.nGroups; h++) {
       const a = h === 0 ? alpha : alpha * s;
       if (a < 0.005) continue;
       const g = this.geos[h];
@@ -887,7 +1111,7 @@ export class VortexEngine {
     ctx.fillStyle = '#CBD5E1';
     ctx.lineWidth = 1;
     const marks = 8;
-    for (let h = 0; h < 2; h++) {
+    for (let h = 0; h < this.nGroups; h++) {
       const a = h === 0 ? alpha : alpha * s;
       if (a < 0.005) continue;
       const g = this.geos[h];
@@ -944,7 +1168,7 @@ export class VortexEngine {
     ctx.fillStyle = '#E2E8F0';
     ctx.strokeStyle = '#94A3B8';
     ctx.lineWidth = 1;
-    for (let h = 0; h < 2; h++) {
+    for (let h = 0; h < this.nGroups; h++) {
       const a = h === 0 ? alpha : alpha * s;
       if (a < 0.005) continue;
       const g = this.geos[h];
@@ -969,7 +1193,8 @@ export class VortexEngine {
       ctx.fillText('GENESIS', x0 - 4, y + 18);
       // arrow + label sit at the far end of the dotted line
       ctx.textAlign = 'right';
-      ctx.fillText('initial heading  →', x1, y + 18);
+      // narrow panels: drop the end label onto a second line so the two never collide
+      ctx.fillText('initial heading  →', x1, y + (x1 - x0 < 210 ? 31 : 18));
       ctx.textAlign = 'left';
     }
     ctx.restore();
@@ -987,7 +1212,7 @@ export class VortexEngine {
     ctx.lineWidth = 1;
     ctx.strokeStyle = '#94A3B8';
     ctx.fillStyle = '#CBD5E1';
-    for (let h = 0; h < 2; h++) {
+    for (let h = 0; h < this.nGroups; h++) {
       const a = h === 0 ? alpha : alpha * s;
       if (a < 0.005) continue;
       const g = this.geos[h];
@@ -1045,7 +1270,7 @@ export class VortexEngine {
     ctx.save();
     ctx.font = '10px "JetBrains Mono", ui-monospace, monospace';
     ctx.textAlign = 'center';
-    for (let h = 0; h < 2; h++) {
+    for (let h = 0; h < this.nGroups; h++) {
       const a = h === 0 ? alpha : alpha * s;
       if (a < 0.005) continue;
       const g = this.geos[h];
@@ -1085,7 +1310,7 @@ export class VortexEngine {
   private drawLand(alpha: number, s: number): void {
     const { ctx, H } = this;
     const { z, tx, ty } = this.cam;
-    for (let h = 0; h < 2; h++) {
+    for (let h = 0; h < this.nGroups; h++) {
       const a = h === 0 ? alpha : alpha * s;
       if (a < 0.005) continue;
       const g = this.geos[h];
@@ -1114,16 +1339,51 @@ export class VortexEngine {
     }
   }
 
-  private drawHemiLabels(s: number): void {
+  /** Hairlines between split panels plus each panel's label, for the given layout snapshot. */
+  private drawPanelChrome(
+    alpha: number,
+    grid: { cols: number; rows: number },
+    labels: string[],
+    geos: Geo[],
+    n: number,
+    W: number,
+    H: number,
+    dpr: number,
+  ): void {
+    if (alpha < 0.005) return;
     const { ctx } = this;
+    const { cols, rows } = grid;
+    const r = this.rect;
     ctx.save();
-    ctx.font = '10px "JetBrains Mono", ui-monospace, monospace';
+    ctx.globalAlpha = alpha * 0.5;
+    ctx.strokeStyle = '#94A3B8';
+    ctx.lineWidth = 1 / dpr + 0.25;
+    ctx.beginPath();
+    for (let c = 1; c < cols; c++) {
+      const dx = Math.round(r.x0 + (c * r.w) / cols) + 0.5;
+      ctx.moveTo(dx, 0);
+      ctx.lineTo(dx, H);
+    }
+    for (let rr = 1; rr < rows; rr++) {
+      const dy = Math.round(r.y0 + (rr * r.h) / rows) + 0.5;
+      ctx.moveTo(0, dy);
+      ctx.lineTo(W, dy);
+    }
+    ctx.stroke();
+    ctx.font = `${n > 3 ? 9 : 10}px "JetBrains Mono", ui-monospace, monospace`;
     ctx.textAlign = 'center';
     ctx.fillStyle = '#94A3B8';
-    ctx.globalAlpha = s * 0.8;
-    const y = this.rect.y0 + this.rect.h - 6;
-    ctx.fillText('NORTHERN HEMISPHERE', this.geos[0].cx, y);
-    ctx.fillText('SOUTHERN HEMISPHERE', this.geos[1].cx, y);
+    ctx.globalAlpha = alpha * 0.8;
+    const cellW = r.w / cols;
+    for (let h = 0; h < n; h++) {
+      const g = geos[h];
+      // with 3+ columns the bottom corner cells sit behind the playback / zoom controls: lift them
+      const col = h % cols;
+      const row = Math.floor(h / cols);
+      const lift = cols >= 3 && row === rows - 1 && (col === 0 || col === cols - 1) ? 46 : 0;
+      const y = g.cy + r.h / rows / 2 - 6 - lift;
+      ctx.fillText(labels[h] ?? '', g.cx, y, Math.max(40, cellW - 8));
+    }
     ctx.restore();
   }
 

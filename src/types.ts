@@ -33,6 +33,17 @@ export interface Cyclone {
 
 export type ViewMode = 'radial' | 'drop' | 'flow' | 'timeline' | 'map';
 export type LayoutMode = 'unified' | 'split';
+/** What the Split layout divides the storms by. */
+export type SplitKey =
+  | 'hemisphere'
+  | 'basin'
+  | 'category'
+  | 'era'
+  | 'season'
+  | 'latitude'
+  | 'sinuosity'
+  | 'duration'
+  | 'intensification';
 
 /** Saffir-Simpson major-hurricane categories (the dataset contains Cat 3+ only). */
 export type Category = 3 | 4 | 5;
@@ -58,6 +69,7 @@ export interface FilterState {
 export interface ViewState {
   mode: ViewMode;
   layout: LayoutMode;
+  splitBy: SplitKey;
   scale: ScaleMode;
   filters: FilterState;
 }

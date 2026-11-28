@@ -9,6 +9,7 @@ import {
   type Cyclone,
   type FilterState,
   type LayoutMode,
+  type SplitKey,
   type ScaleMode,
   type ViewMode,
 } from './types';
@@ -134,6 +135,18 @@ const VIEW_OPTIONS = [
   { value: 'map', label: 'Map' },
 ] as const satisfies ReadonlyArray<{ value: ViewMode; label: string }>;
 
+const SPLIT_OPTIONS: ReadonlyArray<{ value: SplitKey; label: string; title: string }> = [
+  { value: 'hemisphere', label: 'Hemisphere', title: 'Northern vs southern hemisphere' },
+  { value: 'basin', label: 'Basin', title: 'The six ocean basins' },
+  { value: 'category', label: 'Category', title: 'Category 3, 4 and 5' },
+  { value: 'era', label: 'Era', title: 'By decade' },
+  { value: 'season', label: 'Season', title: 'Time of year the storm formed' },
+  { value: 'latitude', label: 'Latitude', title: 'Latitude of genesis' },
+  { value: 'sinuosity', label: 'Shape', title: 'Track shape (sinuosity): straight, curved, looping' },
+  { value: 'duration', label: 'Duration', title: 'Short, medium and long-lived storms' },
+  { value: 'intensification', label: 'Intensity', title: 'Rapidly intensifying vs steady storms' },
+];
+
 const LAYOUT_OPTIONS = [
   { value: 'unified', label: 'Unified' },
   { value: 'split', label: 'Split' },
@@ -170,6 +183,7 @@ export default function App() {
   const [status, setStatus] = useState<DataStatus>('loading');
   const [mode, setMode] = useState<ViewMode>('flow');
   const [layout, setLayout] = useState<LayoutMode>('unified');
+  const [splitBy, setSplitBy] = useState<SplitKey>('hemisphere');
   const [scale, setScale] = useState<ScaleMode>('equal');
   const [basin, setBasin] = useState<BasinFilter>('all');
   const [yearMin, setYearMin] = useState(MIN_YEAR);
@@ -266,7 +280,7 @@ export default function App() {
   // Push data first, then view (filters need data present). Declared in this order on purpose.
   useEffect(() => {
     engineRef.current?.setData(data);
-    engineRef.current?.setView({ mode, layout, scale, filters });
+    engineRef.current?.setView({ mode, layout, splitBy, scale, filters });
     // First load: start the chronological playback straight away (it replaces the opening spread).
     if (data.length > 0 && !autoPlayedRef.current) {
       autoPlayedRef.current = true;
@@ -278,8 +292,8 @@ export default function App() {
   }, [data]);
 
   useEffect(() => {
-    engineRef.current?.setView({ mode, layout, scale, filters });
-  }, [mode, layout, scale, filters]);
+    engineRef.current?.setView({ mode, layout, splitBy, scale, filters });
+  }, [mode, layout, splitBy, scale, filters]);
 
   useEffect(() => {
     engineRef.current?.setIntensity(intensity);
@@ -536,6 +550,28 @@ export default function App() {
 
           <Section title="Layout">
             <Segmented label="Layout" value={layout} options={LAYOUT_OPTIONS} onChange={setLayout} />
+            {layout === 'split' && (
+              <div role="group" aria-label="Split by" className="grid grid-cols-3 gap-0.5 rounded-lg bg-white/[0.04] p-0.5 ring-1 ring-white/10">
+                {SPLIT_OPTIONS.map((o) => {
+                  const active = o.value === splitBy;
+                  return (
+                    <button
+                      key={o.value}
+                      id={`btn-split-${o.value}`}
+                      type="button"
+                      aria-pressed={active}
+                      title={o.title}
+                      onClick={() => setSplitBy(o.value)}
+                      className={`h-8 whitespace-nowrap rounded-md px-1 text-[10.5px] font-medium transition-all duration-200 ${
+                        active ? 'bg-slate-500/45 text-slate-100' : 'text-slate-400 hover:bg-white/5 hover:text-white'
+                      }`}
+                    >
+                      {o.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </Section>
 
           <Section title="Basin">
