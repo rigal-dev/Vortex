@@ -80,7 +80,7 @@ function Segmented<T extends string>({ label, value, options, onChange }: Segmen
     <div
       role="group"
       aria-label={label}
-      className="flex gap-0.5 rounded-lg bg-white/[0.04] p-0.5 ring-1 ring-white/10"
+      className="flex h-9 gap-0.5 rounded-lg bg-white/[0.04] p-0.5 ring-1 ring-white/10"
     >
       {options.map((o) => {
         const active = o.value === value;
@@ -92,7 +92,7 @@ function Segmented<T extends string>({ label, value, options, onChange }: Segmen
             title={o.label}
             aria-pressed={active}
             onClick={() => onChange(o.value)}
-            className={`flex-1 whitespace-nowrap rounded-md py-1.5 font-medium transition-all duration-200 ${
+            className={`flex-1 whitespace-nowrap rounded-md font-medium transition-all duration-200 ${
               compact ? 'px-1 text-[10.5px] tracking-normal' : 'px-2 text-[11px] tracking-wide'
             } ${
               active
@@ -117,17 +117,19 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
+/** Default line intensity multiplier (same for live playback and the finished view). */
+const DEFAULT_INTENSITY = 0.5;
+
 const SPEED_OPTIONS = [
-  { label: 'Slow', rate: 0.75, dur: 3 },
-  { label: 'Normal', rate: 1.5, dur: 2.2 },
-  { label: 'Fast', rate: 3, dur: 1.5 },
+  { label: 'Slower', rate: 1.5, dur: 2.2 },
+  { label: 'Normal', rate: 3, dur: 1.5 },
   { label: 'Faster', rate: 6, dur: 1 },
 ] as const;
 
 const VIEW_OPTIONS = [
-  { value: 'radial', label: 'Radial' },
-  { value: 'drop', label: 'Drop' },
   { value: 'flow', label: 'Flow' },
+  { value: 'drop', label: 'Drop' },
+  { value: 'radial', label: 'Radial' },
   { value: 'timeline', label: 'Timeline' },
   { value: 'map', label: 'Map' },
 ] as const satisfies ReadonlyArray<{ value: ViewMode; label: string }>;
@@ -166,14 +168,14 @@ export default function App() {
   // Synthetic data renders instantly; real data replaces it when it arrives.
   const [data, setData] = useState<Cyclone[]>([]);
   const [status, setStatus] = useState<DataStatus>('loading');
-  const [mode, setMode] = useState<ViewMode>('radial');
+  const [mode, setMode] = useState<ViewMode>('flow');
   const [layout, setLayout] = useState<LayoutMode>('unified');
   const [scale, setScale] = useState<ScaleMode>('equal');
   const [basin, setBasin] = useState<BasinFilter>('all');
   const [yearMin, setYearMin] = useState(MIN_YEAR);
   const [yearMax, setYearMax] = useState(CURRENT_YEAR);
   const [categories, setCategories] = useState<readonly Category[]>(CATEGORIES);
-  const [intensity, setIntensity] = useState(1);
+  const [intensity, setIntensity] = useState(DEFAULT_INTENSITY);
   // Mobile only: which panes are visible (desktop always shows both).
   const [pane, setPane] = useState<PaneMode>('both');
   const [hovered, setHovered] = useState<Cyclone | null>(null);
@@ -182,6 +184,7 @@ export default function App() {
   // Desktop only: the docked controls panel can be collapsed to give the canvas the full width.
   const [menuOpen, setMenuOpen] = useState(true);
   const menuOpenRef = useRef(true);
+  const autoPlayedRef = useRef(false);
   // Chronological playback
   const [playState, setPlayState] = useState<'idle' | 'playing' | 'paused'>('idle');
   const [speedIdx, setSpeedIdx] = useState(1);
@@ -264,6 +267,13 @@ export default function App() {
   useEffect(() => {
     engineRef.current?.setData(data);
     engineRef.current?.setView({ mode, layout, scale, filters });
+    // First load: start the chronological playback straight away (it replaces the opening spread).
+    if (data.length > 0 && !autoPlayedRef.current) {
+      autoPlayedRef.current = true;
+      const sp = SPEED_OPTIONS[speedIdx];
+      engineRef.current?.playStart(sp.rate, sp.dur);
+      setPlayState('playing');
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
@@ -357,7 +367,7 @@ export default function App() {
 
       {/* Title block (floats over the viewer, top-left) */}
       <header className="vx-fade-in pointer-events-none absolute left-3 top-3 min-[900px]:left-7 min-[900px]:top-6">
-        <h1 className="text-base font-light tracking-[0.3em] text-slate-300/80 min-[900px]:text-xl">
+        <h1 className="text-base font-light tracking-[0.55em] text-slate-300/80 min-[900px]:text-xl">
           VORTEX
         </h1>
         <p className="mt-1 text-[11px] text-slate-400 min-[900px]:mt-2 min-[900px]:text-sm">
@@ -373,14 +383,53 @@ export default function App() {
 
       {/* Playback date */}
       {playLabel && (
-        <div className="pointer-events-none absolute bottom-8 left-3 font-mono text-lg tracking-wide text-slate-300/80 min-[900px]:bottom-10 min-[900px]:left-7 min-[900px]:text-2xl">
+        <div className="pointer-events-none absolute bottom-12 left-3 font-mono text-lg tracking-wide text-slate-300/80 min-[900px]:bottom-14 min-[900px]:left-7 min-[900px]:text-2xl">
           {playLabel}
         </div>
       )}
 
-      {/* Interaction hint (bottom-left) */}
-      <div className="pointer-events-none absolute bottom-3 left-3 hidden font-mono text-[10px] tracking-wide text-slate-600 sm:block min-[900px]:bottom-4 min-[900px]:left-7">
-        scroll to zoom · drag to pan · double-click to reset
+      {/* Playback controls: small floating group, bottom-left of the canvas */}
+      <div
+        className="absolute bottom-3 left-3 z-10 flex h-9 items-center overflow-hidden rounded-lg border border-white/10 bg-[#0B0D12]/70 backdrop-blur-xl min-[900px]:bottom-4 min-[900px]:left-7"
+        onPointerMove={(e) => e.stopPropagation()}
+        onPointerEnter={onPointerLeave}
+      >
+        <button
+          id="btn-play"
+          type="button"
+          onClick={togglePlay}
+          aria-label={playState === 'playing' ? 'Pause' : playState === 'paused' ? 'Resume' : 'Play chronologically'}
+          title={playState === 'playing' ? 'Pause' : playState === 'paused' ? 'Resume' : 'Play chronologically'}
+          className="flex h-9 w-9 items-center justify-center text-xs text-slate-300 transition hover:bg-white/10 hover:text-white"
+        >
+          {playState === 'playing' ? '❚❚' : '▶'}
+        </button>
+        <select
+          id="select-speed"
+          aria-label="Playback speed"
+          title="Playback speed"
+          value={speedIdx}
+          onChange={(e) => changeSpeed(Number(e.target.value))}
+          className="h-9 bg-transparent px-2 text-xs text-slate-400 outline-none transition hover:text-white"
+        >
+          {SPEED_OPTIONS.map((o, i) => (
+            <option key={o.label} value={i} className="bg-[#0B0D12]">
+              {o.label}
+            </option>
+          ))}
+        </select>
+        {playState !== 'idle' && (
+          <button
+            id="btn-stop"
+            type="button"
+            onClick={stopPlay}
+            aria-label="Stop playback"
+            title="Stop"
+            className="flex h-9 w-9 items-center justify-center text-xs text-slate-300 transition hover:bg-white/10 hover:text-white"
+          >
+            ■
+          </button>
+        )}
       </div>
 
       {/* Zoom controls */}
@@ -489,49 +538,6 @@ export default function App() {
             <Segmented label="Layout" value={layout} options={LAYOUT_OPTIONS} onChange={setLayout} />
           </Section>
 
-          <Section title="Playback">
-            <div className="flex items-center gap-2">
-              <button
-                id="btn-play"
-                type="button"
-                onClick={togglePlay}
-                aria-label={playState === 'playing' ? 'Pause' : 'Play chronologically'}
-                className="flex h-8 flex-1 items-center justify-center gap-2 rounded-lg bg-white/[0.04] text-[11px] text-slate-200 ring-1 ring-white/10 transition hover:bg-white/10 hover:text-white"
-              >
-                <span aria-hidden>{playState === 'playing' ? '❚❚' : '▶'}</span>
-                {playState === 'playing' ? 'Pause' : playState === 'paused' ? 'Resume' : 'Play'}
-              </button>
-              {playState !== 'idle' && (
-                <button
-                  id="btn-stop"
-                  type="button"
-                  onClick={stopPlay}
-                  aria-label="Stop playback"
-                  title="Stop"
-                  className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/[0.04] text-[11px] text-slate-300 ring-1 ring-white/10 transition hover:bg-white/10 hover:text-white"
-                >
-                  ■
-                </button>
-              )}
-              <select
-                id="select-speed"
-                aria-label="Playback speed"
-                value={speedIdx}
-                onChange={(e) => changeSpeed(Number(e.target.value))}
-                className="h-8 rounded-lg bg-[#0B0D12] px-2 text-[11px] text-slate-300 ring-1 ring-white/10 outline-none transition hover:text-white focus:ring-white/30"
-              >
-                {SPEED_OPTIONS.map((o, i) => (
-                  <option key={o.label} value={i}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <p className="text-[10px] leading-snug text-slate-500">
-              Replays the filtered years in order: each storm draws in from its genesis date, glowing as it grows.
-            </p>
-          </Section>
-
           <Section title="Basin">
             <div className="flex flex-wrap gap-1.5">
               {BASIN_OPTIONS.map((o) => (
@@ -634,11 +640,11 @@ export default function App() {
                 step={0.05}
                 value={intensity}
                 onChange={(e) => setIntensity(+e.target.value)}
-                onDoubleClick={() => setIntensity(1)}
+                onDoubleClick={() => setIntensity(DEFAULT_INTENSITY)}
               />
               <span>brighter</span>
               <span className="w-10 text-right text-xs text-slate-300">
-                {intensity === 1 ? 'auto' : `${intensity.toFixed(2)}×`}
+                {`${intensity.toFixed(2)}×`}
               </span>
             </div>
           </Section>

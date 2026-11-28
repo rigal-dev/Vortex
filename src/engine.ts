@@ -800,7 +800,7 @@ export class VortexEngine {
         const f = clamp01((pl.clock - p.t) / durY);
         lastSeg = f * (p.n - 1);
         growing = f < 1;
-        level = growing ? 1 : 0.3 + 0.7 * Math.exp(-(pl.clock - p.t - durY) / pl.rate / 1.2);
+        // same intensity while drawing as in the finished state (no extra glow, no fade)
       } else if (this.intro < 1) {
         // opening animation: one shared, eased spread fraction for every storm
         lastSeg = (1 - Math.pow(1 - this.intro, 3)) * (p.n - 1);
@@ -810,12 +810,11 @@ export class VortexEngine {
       for (let i = 1; i < p.n; i++) {
         if (i - 1 >= lastSeg) break;
         const frac = Math.min(1, lastSeg - (i - 1));
-        const head = growing && lastSeg - (i - 1) < 4 ? 1 : 0;
         const wi = (p.wind[i - 1] + p.wind[i]) / 2;
         const norm = clamp01((wi - 30) / range);
-        ctx.globalAlpha = Math.min(1, (aFloor + aRange * norm) * base * lift * (wi >= 110 ? 1.3 : 1) * (1 + 0.6 * head));
+        ctx.globalAlpha = Math.min(1, (aFloor + aRange * norm) * base * lift * (wi >= 110 ? 1.3 : 1));
         ctx.strokeStyle = windColor(wi);
-        ctx.lineWidth = (0.8 + 1.7 * norm) * widthScale * (1 + 0.7 * head);
+        ctx.lineWidth = (0.8 + 1.7 * norm) * widthScale;
         const x0 = p.sx[i - 1];
         const y0 = p.sy[i - 1];
         ctx.beginPath();
@@ -828,10 +827,11 @@ export class VortexEngine {
         const fr = lastSeg - i;
         const hx = p.sx[i] + (p.sx[i + 1] - p.sx[i]) * fr;
         const hy = p.sy[i] + (p.sy[i + 1] - p.sy[i]) * fr;
-        ctx.globalAlpha = Math.min(1, 0.9 * p.alpha);
-        ctx.fillStyle = '#FFFFFF';
+        // small head dot in the colour of the wind category at this point of the track
+        ctx.globalAlpha = Math.min(1, 0.95 * p.alpha);
+        ctx.fillStyle = windColor(p.wind[i] + (p.wind[i + 1] - p.wind[i]) * fr);
         ctx.beginPath();
-        ctx.arc(hx, hy, 2.2 * widthScale, 0, Math.PI * 2);
+        ctx.arc(hx, hy, 1.3 * widthScale, 0, Math.PI * 2);
         ctx.fill();
       }
     }
@@ -910,6 +910,26 @@ export class VortexEngine {
         ctx.globalAlpha = a * 0.85;
         ctx.fillText(String(Math.round(this.tMin + (j / marks) * span)), cx + sx * (R + 20), cy + sy * (R + 14));
       }
+      // playback: a dotted guide from the centre to the current time on the ring, labelled
+      if (this.play.active) {
+        const f = clamp01((this.play.clock - this.tMin) / span);
+        const phi = f * Math.PI * 2;
+        const sx = Math.sin(phi);
+        const sy = -Math.cos(phi);
+        ctx.strokeStyle = '#94A3B8';
+        ctx.fillStyle = '#E2E8F0';
+        ctx.setLineDash([2, 8]);
+        ctx.globalAlpha = a * 0.2;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + sx * R, cy + sy * R);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = a * 0.5;
+        ctx.fillText('initial heading', cx + sx * (R + 52), cy + sy * (R + 30));
+        ctx.strokeStyle = '#94A3B8';
+        ctx.fillStyle = '#CBD5E1';
+      }
     }
     ctx.restore();
   }
@@ -946,7 +966,11 @@ export class VortexEngine {
       ctx.arc(x0, y, 3, 0, Math.PI * 2);
       ctx.fill();
       ctx.globalAlpha = a * 0.7;
-      ctx.fillText('GENESIS  →  initial heading', x0 - 4, y + 18);
+      ctx.fillText('GENESIS', x0 - 4, y + 18);
+      // arrow + label sit at the far end of the dotted line
+      ctx.textAlign = 'right';
+      ctx.fillText('initial heading  →', x1, y + 18);
+      ctx.textAlign = 'left';
     }
     ctx.restore();
   }
@@ -992,6 +1016,24 @@ export class VortexEngine {
           ctx.fillText(String(yr), x, y0 + 11);
         }
       }
+      // playback: dotted guide at the current time moving along the axis, labelled above
+      if (this.play.active) {
+        const f = clamp01((this.play.clock - this.tMin) / span);
+        const x = (g.t0x + f * (g.t1x - g.t0x)) * z + tx;
+        ctx.save();
+        ctx.setLineDash([2, 8]);
+        ctx.globalAlpha = a * 0.2;
+        ctx.beginPath();
+        ctx.moveTo(x, y0);
+        ctx.lineTo(x, yTop);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = a * 0.5;
+        ctx.fillStyle = '#E2E8F0';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('end point', x, yTop - 8);
+        ctx.restore();
+      }
     }
     ctx.restore();
   }
@@ -1012,7 +1054,7 @@ export class VortexEngine {
       const y1 = (g.oy - g.len) * z + ty;
       ctx.fillStyle = '#E2E8F0';
       ctx.setLineDash([2, 8]);
-      ctx.globalAlpha = a * fixed * 0.2;
+      ctx.globalAlpha = a * 0.2;
       ctx.strokeStyle = '#94A3B8';
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -1020,17 +1062,22 @@ export class VortexEngine {
       ctx.lineTo(x, y1);
       ctx.stroke();
       ctx.setLineDash([]);
-      for (const [yy, label, dy, vis] of [
+      // genesis dot + label at the bottom; arrow + "end point" label at the top of the line
+      // (the end-point dot itself only shows in Fixed ends, where every track finishes there)
+      for (const [yy, label, dy, dotVis] of [
         [y0, 'GENESIS', 18, 1],
-        [y1, 'DISSIPATION', -12, fixed],
+        [y1, 'end point', -12, fixed],
       ] as const) {
-        ctx.globalAlpha = a * vis * 0.8;
+        ctx.globalAlpha = a * dotVis * 0.8;
         ctx.beginPath();
         ctx.arc(x, yy, 3, 0, Math.PI * 2);
         ctx.fill();
-        ctx.globalAlpha = a * vis * 0.7;
+        ctx.globalAlpha = a * 0.7;
         ctx.fillText(label, x, yy + dy);
       }
+      // arrow on its own line above the "end point" label
+      ctx.globalAlpha = a * 0.7;
+      ctx.fillText('↑', x, y1 - 26);
     }
     ctx.restore();
   }
